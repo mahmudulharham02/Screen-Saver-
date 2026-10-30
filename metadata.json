@@ -1,6 +1,6 @@
 {
   "name": "After Dark — Classic Screen Savers",
-  "description": "A minimalist, high-performance dark screen saver dashboard featuring 32 classic, cinematic, scientific, and technical animations with an automatic 8-minute All Types Randomizer.",
+  "description": "A minimalist, high-performance dark screen saver dashboard featuring 33 classic, cinematic, scientific, and technical animations with an automatic 8-minute All Types Randomizer.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

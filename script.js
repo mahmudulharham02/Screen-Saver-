@@ -110,6 +110,7 @@ const CATEGORIES = [
       { id: 'tech', title: 'Tech', create: createTech },
       { id: 'computer', title: 'Computer', create: createComputer },
       { id: 'binary', title: 'Binary', create: createBinary },
+      { id: 'binary-orbits', title: 'Binary Orbits', create: createBinaryOrbits },
       { id: 'hexa', title: 'Hexa', create: createHexa },
       { id: 'terminal', title: 'Terminal', create: createTerminal }
     ]
@@ -5110,7 +5111,247 @@ function createBinary(canvas, isPreview) {
 }
 
 /**
- * 31. HEXA (TECHNOLOGY)
+ * 31. BINARY ORBITS (TECHNOLOGY)
+ * Three-dimensional particle-based spiral galaxy inspired by React Bits Pro Binary Orbits.
+ * Tilted approximately 65 degrees in perspective with a luminous central core,
+ * 4 recognizable spiral arms with thousands of stars continuously streaming outward,
+ * organic velocity distribution, depth scaling, and restrained celestial palette.
+ */
+function createBinaryOrbits(canvas, isPreview) {
+  let width = 0;
+  let height = 0;
+  let time = 0;
+  let galaxyRot = 0;
+
+  // Particle counts: ~8,000 for preview, ~55,000 for full-screen runtime
+  const count = isPreview ? 8000 : 55000;
+
+  // High performance typed arrays
+  const radii = new Float32Array(count);
+  const phases = new Float32Array(count);
+  const arms = new Uint8Array(count);
+  const zOffsets = new Float32Array(count);
+  const speeds = new Float32Array(count);
+  const sizes = new Float32Array(count);
+  const colorTypes = new Uint8Array(count); // 0: White, 1: Pale Blue, 2: Electric Light Blue, 3: Core Warm/Gold
+
+  // Pre-rendered radial glow sprites for maximum 60fps rendering efficiency
+  const spriteCanvases = [];
+
+  function createGlowSprite(color, r) {
+    const sCanvas = document.createElement('canvas');
+    const sSize = r * 2;
+    sCanvas.width = sSize;
+    sCanvas.height = sSize;
+    const sCtx = sCanvas.getContext('2d');
+    const grad = sCtx.createRadialGradient(r, r, 0, r, r, r);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.35, color);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    sCtx.fillStyle = grad;
+    sCtx.beginPath();
+    sCtx.arc(r, r, r, 0, Math.PI * 2);
+    sCtx.fill();
+    return sCanvas;
+  }
+
+  // Pre-render star sprites
+  const spriteWhite = createGlowSprite('rgba(255, 255, 255, 0.9)', 8);
+  const spritePaleBlue = createGlowSprite('rgba(186, 230, 253, 0.85)', 8);
+  const spriteCyan = createGlowSprite('rgba(135, 206, 250, 0.95)', 8);
+  const spriteWarm = createGlowSprite('rgba(254, 240, 138, 0.9)', 8);
+  spriteCanvases[0] = spriteWhite;
+  spriteCanvases[1] = spritePaleBlue;
+  spriteCanvases[2] = spriteCyan;
+  spriteCanvases[3] = spriteWarm;
+
+  // Distant background stars
+  const bgStars = [];
+  function initBgStars(w, h) {
+    bgStars.length = 0;
+    const numBg = isPreview ? 25 : 80;
+    for (let i = 0; i < numBg; i++) {
+      bgStars.push({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        r: Math.random() * 1.2 + 0.4,
+        alpha: Math.random() * 0.4 + 0.2
+      });
+    }
+  }
+
+  let maxGalaxyRadius = 300;
+  const NUM_ARMS = 4;
+  const TILT_ANGLE = 65 * (Math.PI / 180); // ~1.134 radians (~65 degrees tilt)
+  const COS_TILT = Math.cos(TILT_ANGLE);
+  const SIN_TILT = Math.sin(TILT_ANGLE);
+
+  function initParticles(w, h) {
+    maxGalaxyRadius = Math.min(w, h) * (isPreview ? 0.44 : 0.46);
+    initBgStars(w, h);
+
+    for (let i = 0; i < count; i++) {
+      // Exponential distribution: denser toward the galactic core
+      const rRatio = Math.pow(Math.random(), 1.6);
+      const r = rRatio * maxGalaxyRadius;
+      radii[i] = r;
+
+      // 4 recognizable spiral arms
+      const arm = Math.floor(Math.random() * NUM_ARMS);
+      arms[i] = arm;
+
+      // Particle phase dispersion: tight near core, expanding slightly outward
+      const armSpread = 0.22 + 0.38 * (r / maxGalaxyRadius);
+      phases[i] = (Math.random() - 0.5) * armSpread;
+
+      // Disc vertical thickness: thick spherical bulge at center, thinning into disc
+      const coreBulge = Math.max(0, 1.0 - r / (maxGalaxyRadius * 0.3));
+      const discThickness = maxGalaxyRadius * (0.08 + coreBulge * 0.18);
+      zOffsets[i] = (Math.random() - 0.5) * discThickness;
+
+      // Orbital stream speed: faster in inner region, sustained along arms
+      speeds[i] = (0.035 + 0.05 * (1.0 - r / maxGalaxyRadius)) * maxGalaxyRadius;
+
+      // Particle size
+      const baseSz = (isPreview ? 1.0 : 1.4) + Math.random() * (isPreview ? 1.4 : 2.2);
+      sizes[i] = (r < maxGalaxyRadius * 0.12) ? baseSz * 1.5 : baseSz;
+
+      // Color classification
+      if (r < maxGalaxyRadius * 0.15 && Math.random() < 0.35) {
+        colorTypes[i] = 3; // Warm stellar core
+      } else {
+        const randCol = Math.random();
+        if (randCol < 0.45) colorTypes[i] = 0; // Pure white
+        else if (randCol < 0.75) colorTypes[i] = 1; // Pale blue
+        else colorTypes[i] = 2; // Electric cyan #87CEFA
+      }
+    }
+  }
+
+  return {
+    resize(w, h) {
+      width = w;
+      height = h;
+      initParticles(w, h);
+    },
+    update(dt, isHovered) {
+      const motionScale = prefersReducedMotion ? 0.3 : 1.0;
+      const speedMult = (isHovered && !prefersReducedMotion ? 1.35 : 1.0) * motionScale;
+      const stepDt = Math.min(dt, 0.08) * speedMult;
+      time += stepDt;
+
+      // Overall galaxy rotation
+      galaxyRot += stepDt * 0.07;
+
+      const twist = 3.2 / maxGalaxyRadius;
+
+      // Continuous stellar streaming along spiral arms
+      for (let i = 0; i < count; i++) {
+        radii[i] += speeds[i] * stepDt;
+
+        // When a star leaves the outer galaxy edge, recirculate smoothly into the core
+        if (radii[i] > maxGalaxyRadius) {
+          radii[i] = Math.random() * (maxGalaxyRadius * 0.06);
+          arms[i] = (arms[i] + 1) % NUM_ARMS;
+          phases[i] = (Math.random() - 0.5) * 0.22;
+          const coreBulge = 1.0;
+          const discThickness = maxGalaxyRadius * (0.08 + coreBulge * 0.18);
+          zOffsets[i] = (Math.random() - 0.5) * discThickness;
+        }
+      }
+    },
+    draw(context, w, h) {
+      // Pure deep space black
+      context.fillStyle = '#000000';
+      context.fillRect(0, 0, w, h);
+
+      // Faint distant background stars
+      for (let s of bgStars) {
+        context.fillStyle = `rgba(255, 255, 255, ${s.alpha})`;
+        context.beginPath();
+        context.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        context.fill();
+      }
+
+      const cx = w / 2;
+      const cy = h / 2;
+      const twist = 3.2 / maxGalaxyRadius;
+
+      // Galactic Core Soft Luminous Glow (Multi-pass radial glow)
+      const coreR = maxGalaxyRadius * 0.32;
+      const coreGlow = context.createRadialGradient(cx, cy, 2, cx, cy, coreR);
+      coreGlow.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+      coreGlow.addColorStop(0.2, 'rgba(254, 240, 138, 0.65)');
+      coreGlow.addColorStop(0.5, 'rgba(135, 206, 250, 0.35)');
+      coreGlow.addColorStop(0.8, 'rgba(56, 189, 248, 0.1)');
+      coreGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+      context.save();
+      // Elliptical core glow matching 65-degree tilt
+      context.translate(cx, cy);
+      context.scale(1.0, COS_TILT);
+      context.fillStyle = coreGlow;
+      context.beginPath();
+      context.arc(0, 0, coreR, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+
+      // 3D Perspective Projection for ~55,000 Stars
+      const fov = Math.max(w, h) * 1.5;
+      const armAngleStep = (Math.PI * 2) / NUM_ARMS;
+
+      // Batch render stars using pre-rendered sprites
+      for (let i = 0; i < count; i++) {
+        const r = radii[i];
+        const armOffset = arms[i] * armAngleStep;
+        const theta = galaxyRot + r * twist + armOffset + phases[i];
+
+        // 3D coordinates in galaxy plane
+        const x0 = r * Math.cos(theta);
+        const y0 = r * Math.sin(theta);
+        const z0 = zOffsets[i];
+
+        // Rotate by 65 degrees around X-axis
+        const y1 = y0 * COS_TILT - z0 * SIN_TILT;
+        const z1 = y0 * SIN_TILT + z0 * COS_TILT;
+
+        // Perspective scale & depth
+        const pScale = fov / (fov + z1);
+        const px = cx + x0 * pScale;
+        const py = cy + y1 * pScale;
+
+        // Skip particles outside viewport
+        if (px < -20 || px > w + 20 || py < -20 || py > h + 20) continue;
+
+        const sz = Math.max(0.6, sizes[i] * pScale);
+        const sprite = spriteCanvases[colorTypes[i]];
+
+        if (sz < 1.2) {
+          // Fast point draw for micro stars
+          context.fillStyle = colorTypes[i] === 2 ? '#87CEFA' : '#ffffff';
+          context.fillRect(px, py, sz, sz);
+        } else {
+          // Pre-rendered luminous glow sprite
+          context.drawImage(sprite, px - sz, py - sz, sz * 2, sz * 2);
+        }
+      }
+
+      // Runtime subtitle
+      if (!isPreview) {
+        context.fillStyle = 'rgba(135, 206, 250, 0.75)';
+        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
+        context.textAlign = 'left';
+        context.fillText('ASTROPHYSICS: BINARY ORBITS — 3D SPIRAL GALAXY & STELLAR DISK [65° TILT]', 28, h - 28);
+      }
+    },
+    destroy() {
+      bgStars.length = 0;
+    }
+  };
+}
+
+/**
+ * 32. HEXA (TECHNOLOGY)
  * 64-bit Hexadecimal memory dump inspector with real-time streaming addresses,
  * 16-byte hex rows, ASCII translation column, instruction pointer (RIP) frames,
  * and memory segment highlights.
@@ -5210,29 +5451,145 @@ function createHexa(canvas, isPreview) {
 
 /**
  * 32. TERMINAL (TECHNOLOGY)
- * Simulated retro UNIX/BSD terminal console: character-by-character command
- * typing, realistic output streaming, command prompts, system logs,
- * and pulsing block cursor. Client-side simulation only; never touches system.
+ * Infinite Linux Bootloader & Systemd Initialization Simulation.
+ * Believable, endlessly repeating Linux console startup log: bootloader loading,
+ * kernel initialization, physical RAM e820 map, SMP CPUs, hardware detection
+ * (PCIe NVMe, xHCI USB, Ethernet, GPU DRM), filesystem mounting, systemd services
+ * with green [  OK  ] markers, graphical target reached, brief pause, then fresh
+ * randomized cycle looping indefinitely.
  */
 function createTerminal(canvas, isPreview) {
   let width = 0;
   let height = 0;
   let time = 0;
 
-  const SCRIPT = [
-    { cmd: 'uname -srm', out: ['Linux 6.12.8-afterdark x86_64'] },
-    { cmd: 'uptime', out: [' 11:50:00 up 42 days, 14:28, 1 user, load average: 0.12, 0.08, 0.05'] },
-    { cmd: 'dmesg | tail -n 4', out: ['[    0.041002] ACPI: Core revision 20260814', '[    0.128450] pci 0000:00:00.0: [8086:9a04] type 00 class 0x060000', '[    0.892014] systemd[1]: Detected architecture x86-64.'] },
-    { cmd: 'ps aux --sort=-%cpu | head -n 4', out: ['USER       PID %CPU %MEM    VSZ   RSS STAT START   TIME COMMAND', 'root         1  0.0  0.1  21940 11488 Ss   00:00   0:02 /sbin/init', 'afterdark  842  2.4  0.8 142800 68200 S    00:15   1:42 /usr/bin/screensaver'] },
-    { cmd: 'cc -O3 -Wall -c screen_saver.c', out: ['[100%] Built target screensaver_engine'] },
-    { cmd: 'netstat -tuln', out: ['Proto Recv-Q Send-Q Local Address           Foreign Address         State', 'tcp        0      0 0.0.0.0:3000            0.0.0.0:*               LISTEN'] }
-  ];
+  // Boot sequence state
+  let sequence = [];
+  let lineIndex = 0;
+  let lineTimer = 0;
+  let currentDelay = 0.05;
+  let isBootComplete = false;
+  let completionPauseTimer = 0;
+  let fadeAlpha = 1.0;
+  let isFading = false;
 
-  let scriptIdx = 0;
-  let charIdx = 0;
-  let phase = 'TYPING'; // 'TYPING' | 'WAIT' | 'OUTPUT'
-  let phaseTimer = 0;
   const history = [];
+
+  function generateUUID() {
+    const s = (len) => Array.from({ length: len }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+    return `${s(8)}-${s(4)}-${s(4)}-${s(4)}-${s(12)}`;
+  }
+
+  function generateBootSequence() {
+    const uuid = generateUUID();
+    const cores = [8, 12, 16, 24, 32][Math.floor(Math.random() * 5)];
+    const ramGB = [16, 32, 64, 128][Math.floor(Math.random() * 4)];
+    const ramKB = ramGB * 1024 * 1024 - Math.floor(Math.random() * 800000);
+    const diskGB = [512, 1000, 2000, 4000][Math.floor(Math.random() * 4)];
+    const nic = ['eth0', 'enp3s0', 'enp4s0f0'][Math.floor(Math.random() * 3)];
+    const gpu = [
+      'amdgpu 3.54.0 on minor 0 (4K DisplayPort connected)',
+      'i915 DRM/KMS on minor 0 (eDP-1 connected)',
+      'nouveau DRM on minor 0 (HDMI-A-1 connected)'
+    ][Math.floor(Math.random() * 3)];
+
+    const seq = [];
+
+    // Stage 1: Bootloader
+    seq.push({ type: 'boot', text: 'Loading Linux 6.12.8-afterdark ...', delay: 0.25 });
+    seq.push({ type: 'boot', text: 'Loading initial ramdisk ...', delay: 0.35 });
+    seq.push({ type: 'boot', text: 'EFI v2.80 by AFTERDARK FIRMWARE (x86_64)', delay: 0.15 });
+    seq.push({ type: 'blank', text: '', delay: 0.08 });
+
+    // Stage 2: Kernel Initialization
+    seq.push({ type: 'kernel', text: '[    0.000000] Linux version 6.12.8-afterdark (buildd@afterdark) (gcc 14.2.0) #1 SMP PREEMPT_DYNAMIC', delay: 0.06 });
+    seq.push({ type: 'kernel', text: `[    0.000000] Command line: BOOT_IMAGE=/vmlinuz-6.12.8 root=UUID=${uuid} ro quiet splash loglevel=4 security=apparmor`, delay: 0.04 });
+    seq.push({ type: 'kernel', text: "[    0.000000] x86/fpu: Supporting XSAVE feature 0x001: 'x87 floating point registers'", delay: 0.02 });
+    seq.push({ type: 'kernel', text: "[    0.000000] x86/fpu: Supporting XSAVE feature 0x002: 'SSE registers'", delay: 0.02 });
+    seq.push({ type: 'kernel', text: "[    0.000000] x86/fpu: Supporting XSAVE feature 0x004: 'AVX registers'", delay: 0.02 });
+    seq.push({ type: 'kernel', text: `[    0.000000] BIOS-provided physical RAM map: [mem 0x0000000000100000-0x0000000${ramGB > 32 ? 'f' : '7'}fffffff] usable`, delay: 0.03 });
+    seq.push({ type: 'kernel', text: `[    0.012480] smpboot: Allowing ${cores} CPUs, 0 hotplug CPUs`, delay: 0.04 });
+    seq.push({ type: 'kernel', text: `[    0.024102] setup_percpu: NR_CPUS:64 nr_cpumask_bits:64 nr_cpu_ids:${cores} nr_node_ids:1`, delay: 0.03 });
+    seq.push({ type: 'kernel', text: '[    0.048912] ACPI: Early table checksum verification enabled', delay: 0.03 });
+    seq.push({ type: 'kernel', text: '[    0.051200] ACPI: RSDP 0x000000007FEF0014 000024 (v02 AFTERD)', delay: 0.02 });
+    seq.push({ type: 'kernel', text: '[    0.062400] IOAPIC[0]: apic_id 2, version 32, address 0xfec00000, GSI 0-23', delay: 0.03 });
+    seq.push({ type: 'kernel', text: `[    0.082400] smp: Brought up 1 node, ${cores} CPUs`, delay: 0.05 });
+    seq.push({ type: 'kernel', text: `[    0.104200] Memory: ${ramKB}K available (14336K kernel code, 2560K rwdata, 7168K rodata)`, delay: 0.04 });
+    seq.push({ type: 'kernel', text: '[    0.120500] rcu: Hierarchical RCU implementation.', delay: 0.02 });
+    seq.push({ type: 'kernel', text: '[    0.142010] clocksource: hpet: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 13348488282 ns', delay: 0.03 });
+
+    // Stage 3: Hardware Detection
+    seq.push({ type: 'kernel', text: '[    0.184200] pci 0000:00:00.0: [8086:9a04] Host bridge', delay: 0.02 });
+    seq.push({ type: 'kernel', text: '[    0.204500] pci 0000:00:01.0: PCI bridge to [bus 01]', delay: 0.02 });
+    seq.push({ type: 'kernel', text: '[    0.218900] nvme nvme0: pci function 0000:01:00.0, 4 PCIe Gen4 lanes', delay: 0.03 });
+    seq.push({ type: 'kernel', text: `[    0.235100] nvme0n1: ${diskGB}GB NVMe PCIe Gen4 SSD, sector size 512, write cache enabled`, delay: 0.04 });
+    seq.push({ type: 'kernel', text: '[    0.251400] xhci_hcd 0000:00:14.0: xHCI Host Controller, 12 ports USB 3.2', delay: 0.03 });
+    seq.push({ type: 'kernel', text: '[    0.270100] usb 1-1: new high-speed USB device number 2 using xhci_hcd', delay: 0.02 });
+    seq.push({ type: 'kernel', text: '[    0.291000] input: USB Optical Gaming Mouse as /devices/pci0000:00/0000:00:14.0/usb1/1-1', delay: 0.02 });
+    seq.push({ type: 'kernel', text: '[    0.312000] input: AT Translated Set 2 keyboard as /devices/platform/i8042/serio0/input/input0', delay: 0.02 });
+    seq.push({ type: 'kernel', text: `[    0.342100] e1000e 0000:00:1f.6 ${nic}: Intel PRO/1000 Network Connection (link UP 1000Mbps Full)`, delay: 0.04 });
+    seq.push({ type: 'kernel', text: `[    0.380400] [drm] Initialized ${gpu}`, delay: 0.05 });
+
+    // Stage 4: Filesystem Initialization
+    seq.push({ type: 'kernel', text: '[    0.412000] devtmpfs: initialized', delay: 0.02 });
+    seq.push({ type: 'kernel', text: `[    0.435000] EXT4-fs (nvme0n1p2): mounted filesystem ${uuid} with ordered data mode.`, delay: 0.05 });
+    seq.push({ type: 'kernel', text: '[    0.456000] VFS: Mounted root (ext4 filesystem) readonly on device 259:2.', delay: 0.04 });
+    seq.push({ type: 'kernel', text: "[    0.482000] systemd[1]: Inserted module 'autofs4'", delay: 0.03 });
+    seq.push({ type: 'kernel', text: '[    0.501200] systemd[1]: Detected architecture x86-64.', delay: 0.02 });
+    seq.push({ type: 'kernel', text: '[    0.524000] systemd[1]: Set hostname to <afterdark-station>.', delay: 0.04 });
+    seq.push({ type: 'blank', text: '', delay: 0.06 });
+
+    // Stage 5: System Services (systemd OK messages)
+    seq.push({ type: 'ok', text: 'Started File System Check on /dev/disk/by-uuid/' + uuid.slice(0, 8) + '.', delay: 0.06 });
+    seq.push({ type: 'ok', text: 'Mounted /boot/efi.', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Mounted /sys/kernel/debug.', delay: 0.03 });
+    seq.push({ type: 'ok', text: 'Created slice Slice /system/systemd-journald.', delay: 0.03 });
+    seq.push({ type: 'ok', text: 'Started Journal Service.', delay: 0.05 });
+    seq.push({ type: 'ok', text: 'Started udev Kernel Device Manager.', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Reached target Local File Systems.', delay: 0.05 });
+    seq.push({ type: 'ok', text: 'Started Set Up Additional Binary Formats.', delay: 0.03 });
+    seq.push({ type: 'ok', text: 'Reached target Cryptography.', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Started Rule-based Manager for Device Events.', delay: 0.05 });
+    seq.push({ type: 'ok', text: 'Started Network Time Synchronization.', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Reached target System Time Synchronized.', delay: 0.03 });
+    seq.push({ type: 'ok', text: 'Started D-Bus System Message Bus.', delay: 0.05 });
+    seq.push({ type: 'ok', text: 'Started Network Manager.', delay: 0.06 });
+    seq.push({ type: 'ok', text: 'Reached target Network.', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Started OpenSSH Server Daemon.', delay: 0.05 });
+    seq.push({ type: 'ok', text: 'Started Thermal Daemon Service.', delay: 0.03 });
+    seq.push({ type: 'ok', text: 'Started System Logging Service.', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Reached target Sound Card.', delay: 0.03 });
+    seq.push({ type: 'ok', text: 'Started PipeWire Multimedia Sound Server.', delay: 0.06 });
+    seq.push({ type: 'ok', text: 'Started User Manager for UID 1000.', delay: 0.05 });
+    seq.push({ type: 'ok', text: 'Started Accounts Service.', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Started Disk Manager (udisks2).', delay: 0.04 });
+    seq.push({ type: 'ok', text: 'Reached target Multi-User System.', delay: 0.06 });
+    seq.push({ type: 'ok', text: 'Started Display Manager (Wayland / DRM Compositor).', delay: 0.08 });
+
+    // Stage 6: Final Boot Completion
+    seq.push({ type: 'ok', text: 'Reached target Graphical Interface.', delay: 0.08 });
+    seq.push({ type: 'ok', text: 'Finished Hold until boot process finishes up.', delay: 0.06 });
+    seq.push({ type: 'ok', text: 'Reached target System Ready.', delay: 0.12 });
+    seq.push({ type: 'blank', text: '', delay: 0.1 });
+    seq.push({ type: 'boot', text: 'Welcome to After Dark Linux 6.12.8 (tty1)', delay: 0.15 });
+    seq.push({ type: 'prompt', text: 'afterdark-station login: ', delay: 0.2 });
+
+    return seq;
+  }
+
+  function resetBoot() {
+    sequence = generateBootSequence();
+    lineIndex = 0;
+    lineTimer = 0;
+    currentDelay = 0.05;
+    isBootComplete = false;
+    completionPauseTimer = 0;
+    fadeAlpha = 1.0;
+    isFading = false;
+    history.length = 0;
+  }
+
+  resetBoot();
 
   return {
     resize(w, h) {
@@ -5241,108 +5598,144 @@ function createTerminal(canvas, isPreview) {
     },
     update(dt, isHovered) {
       const motionScale = prefersReducedMotion ? 0.35 : 1.0;
-      const speedMult = (isHovered && !prefersReducedMotion ? 1.35 : 1.0) * motionScale;
+      // In hover mode, accelerate bootloader streaming for responsive preview
+      const speedMult = (isHovered && !prefersReducedMotion ? 2.2 : 1.0) * motionScale;
       const stepDt = Math.min(dt, 0.08) * speedMult;
       time += stepDt;
 
-      const current = SCRIPT[scriptIdx];
+      if (isFading) {
+        fadeAlpha -= stepDt * 2.5;
+        if (fadeAlpha <= 0) {
+          resetBoot();
+        }
+        return;
+      }
 
-      if (phase === 'TYPING') {
-        phaseTimer += stepDt;
-        if (phaseTimer > 0.06) {
-          phaseTimer = 0;
-          charIdx++;
-          if (charIdx > current.cmd.length) {
-            phase = 'WAIT';
-            phaseTimer = 0;
-          }
+      if (isBootComplete) {
+        completionPauseTimer += stepDt;
+        // Pause 3.0 seconds on completed boot prompt, then fade into fresh boot cycle
+        if (completionPauseTimer > 3.0) {
+          isFading = true;
         }
-      } else if (phase === 'WAIT') {
-        phaseTimer += stepDt;
-        if (phaseTimer > 0.35) {
-          phase = 'OUTPUT';
-          phaseTimer = 0;
-          history.push(`root@afterdark:~# ${current.cmd}`);
-          for (let line of current.out) {
-            history.push(line);
+        return;
+      }
+
+      lineTimer += stepDt;
+      if (lineTimer >= currentDelay) {
+        lineTimer = 0;
+        if (lineIndex < sequence.length) {
+          const item = sequence[lineIndex];
+          history.push(item);
+          // Limit memory to 80 recent lines
+          if (history.length > 80) {
+            history.shift();
           }
-          if (history.length > 28) {
-            history.splice(0, history.length - 28);
+          currentDelay = item.delay || 0.05;
+          lineIndex++;
+          if (lineIndex >= sequence.length) {
+            isBootComplete = true;
+            completionPauseTimer = 0;
           }
-        }
-      } else if (phase === 'OUTPUT') {
-        phaseTimer += stepDt;
-        if (phaseTimer > 1.2) {
-          phase = 'TYPING';
-          phaseTimer = 0;
-          charIdx = 0;
-          scriptIdx = (scriptIdx + 1) % SCRIPT.length;
         }
       }
     },
     draw(context, w, h) {
-      // Dark CRT terminal background
-      context.fillStyle = '#020508';
+      context.save();
+      context.globalAlpha = Math.max(0, Math.min(1, fadeAlpha));
+
+      // Classic dark console background
+      context.fillStyle = '#000000';
       context.fillRect(0, 0, w, h);
 
-      // CRT scanline raster
-      context.fillStyle = 'rgba(0, 0, 0, 0.25)';
+      // Subtle CRT scanline raster
+      context.fillStyle = 'rgba(255, 255, 255, 0.015)';
       for (let y = 0; y < h; y += 3) {
         context.fillRect(0, y, w, 1);
       }
 
-      const fontSize = isPreview ? 9 : 13;
-      const lineH = isPreview ? 13 : 18;
-      context.font = `${fontSize}px -apple-system, BlinkMacSystemFont, "SF Mono", monospace`;
-      context.textAlign = 'left';
+      const fontSize = isPreview ? 8.5 : 12.5;
+      const lineH = isPreview ? 12 : 17;
+      context.font = `${fontSize}px -apple-system, BlinkMacSystemFont, "SF Mono", "Courier New", monospace`;
       context.textBaseline = 'top';
 
-      const maxLines = Math.floor((h - 40) / lineH);
-      const displayHistory = history.slice(-maxLines);
+      const paddingX = isPreview ? 8 : 24;
+      const paddingY = isPreview ? 8 : 20;
+      const maxVisibleLines = Math.floor((h - paddingY * 2) / lineH);
 
-      let curY = 20;
+      // Auto-scrolling: follow newest lines
+      const displayLines = history.slice(-maxVisibleLines);
+      let curY = paddingY;
 
-      for (let line of displayHistory) {
-        if (line.startsWith('root@afterdark')) {
+      for (let item of displayLines) {
+        if (item.type === 'ok') {
+          // Systemd [  OK  ] style formatting
+          context.fillStyle = '#94a3b8'; // bracket grey
+          context.fillText('[', paddingX, curY);
+
+          context.fillStyle = '#22c55e'; // green OK
+          context.fillText('  OK  ', paddingX + context.measureText('[').width, curY);
+
+          const okW = context.measureText('[  OK  ]').width;
+          context.fillStyle = '#94a3b8';
+          context.fillText('] ', paddingX + context.measureText('[  OK  ').width, curY);
+
+          context.fillStyle = '#f1f5f9'; // white description
+          context.fillText(item.text, paddingX + okW + 4, curY);
+        } else if (item.type === 'kernel') {
+          // Timestamp in muted blue-grey, log text in crisp soft white
+          const match = item.text.match(/^(\[[^\]]+\])(.*)$/);
+          if (match) {
+            context.fillStyle = '#64748b';
+            context.fillText(match[1], paddingX, curY);
+            const tsW = context.measureText(match[1]).width;
+            context.fillStyle = '#e2e8f0';
+            context.fillText(match[2], paddingX + tsW, curY);
+          } else {
+            context.fillStyle = '#e2e8f0';
+            context.fillText(item.text, paddingX, curY);
+          }
+        } else if (item.type === 'boot') {
           context.fillStyle = '#87CEFA';
+          context.fillText(item.text, paddingX, curY);
+        } else if (item.type === 'prompt') {
+          context.fillStyle = '#ffffff';
+          context.fillText(item.text, paddingX, curY);
+
+          // Blinking solid block cursor █
+          if (Math.sin(time * 7) > 0) {
+            const pW = context.measureText(item.text).width;
+            context.fillStyle = '#87CEFA';
+            context.fillRect(paddingX + pW, curY + 1, fontSize * 0.55, fontSize);
+          }
         } else {
           context.fillStyle = '#cbd5e1';
+          context.fillText(item.text, paddingX, curY);
         }
-        context.fillText(line, 24, curY);
+
         curY += lineH;
       }
 
-      // Currently typing command prompt line
-      if (curY < h - 20) {
-        const current = SCRIPT[scriptIdx];
-        const typedCmd = current.cmd.slice(0, charIdx);
-        const prompt = 'root@afterdark:~# ';
-
-        context.fillStyle = '#87CEFA';
-        context.fillText(prompt, 24, curY);
-
-        const promptW = context.measureText(prompt).width;
-        context.fillStyle = '#ffffff';
-        context.fillText(typedCmd, 24 + promptW, curY);
-
-        // Blinking solid block cursor █
+      // Blinking cursor if still typing during active boot
+      if (!isBootComplete && curY < h - paddingY) {
         if (Math.sin(time * 8) > 0) {
-          const cmdW = context.measureText(typedCmd).width;
           context.fillStyle = '#87CEFA';
-          context.fillRect(24 + promptW + cmdW, curY + 1, fontSize * 0.6, fontSize);
+          context.fillRect(paddingX, curY + 1, fontSize * 0.55, fontSize);
         }
       }
 
-      // Runtime subtitle
+      // Subtitle in full runtime
       if (!isPreview) {
         context.fillStyle = 'rgba(135, 206, 250, 0.75)';
         context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
         context.textAlign = 'left';
-        context.fillText('TERMINAL CONSOLE: POSIX TTY PSEUDOTERMINAL SIMULATION', 28, h - 28);
+        context.fillText('LINUX KERNEL: INFINITE BOOTLOADER & SYSTEMD INITIALIZATION SEQUENCE', 28, h - 28);
       }
+
+      context.restore();
     },
     destroy() {
       history.length = 0;
+      sequence.length = 0;
     }
   };
 }
@@ -5360,6 +5753,7 @@ function createRandomizerPreview(canvas, isPreview) {
 
   // Sampler engines to cycle through across categories
   const toasters = createFlyingToasters(canvas, true);
+  const binaryOrbits = createBinaryOrbits(canvas, true);
   const spiderMan = createSpiderMan(canvas, true);
   const interstellar = createInterstellar(canvas, true);
   const ocean = createUnderTheOcean(canvas, true);
@@ -5369,7 +5763,7 @@ function createRandomizerPreview(canvas, isPreview) {
   const terminal = createTerminal(canvas, true);
   const dna = createDNADoubleHelix(canvas, true);
   const math = createMathematicalCurves(canvas, true);
-  const samplers = [toasters, spiderMan, interstellar, ocean, fusion, tech, computer, terminal, dna, math];
+  const samplers = [toasters, binaryOrbits, spiderMan, interstellar, ocean, fusion, tech, computer, terminal, dna, math];
 
   return {
     resize(w, h, dpr) {
