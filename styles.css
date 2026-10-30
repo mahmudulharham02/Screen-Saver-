@@ -1,0 +1,257 @@
+/* AFTER DARK - CLASSIC SCREEN SAVERS STYLES
+   Strict Palette: Black (#000000), White (#FFFFFF), Light Blue (#87CEFA)
+   Zero icons, emojis, or decorative symbols. Text-only interface.
+*/
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background-color: #000000;
+  color: #FFFFFF;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* DASHBOARD LAYOUT */
+#dashboard {
+  min-height: 100vh;
+  padding: 48px 32px 64px;
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.dashboard-header {
+  margin-bottom: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dashboard-title {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #FFFFFF;
+  line-height: 1.2;
+}
+
+.dashboard-subtitle {
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: #87CEFA;
+  line-height: 1.4;
+}
+
+/* CATEGORY CONTAINERS */
+.dashboard-categories {
+  display: flex;
+  flex-direction: column;
+  gap: 52px;
+  width: 100%;
+}
+
+.category-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+}
+
+.category-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #87CEFA;
+  margin: 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+/* SCREEN SAVER GRID */
+.screensaver-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 28px 24px;
+  width: 100%;
+}
+
+@media (max-width: 1200px) {
+  .screensaver-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 860px) {
+  .screensaver-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px 16px;
+  }
+  #dashboard {
+    padding: 32px 20px 48px;
+  }
+  .dashboard-title {
+    font-size: 24px;
+  }
+}
+
+@media (max-width: 540px) {
+  .screensaver-grid {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+}
+
+/* PREVIEW CARD */
+.screensaver-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  outline: none;
+  width: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.screensaver-card:focus-visible .preview-viewport {
+  border-color: #87CEFA;
+  box-shadow: 0 0 0 2px #87CEFA;
+}
+
+.preview-viewport {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background-color: #000000;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+  transition: border-color 240ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  contain: layout paint;
+}
+
+.screensaver-card:hover .preview-viewport {
+  border-color: #87CEFA;
+  box-shadow: 0 0 16px rgba(135, 206, 250, 0.22);
+}
+
+.preview-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  transform: translateZ(0);
+}
+
+.card-title {
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: #FFFFFF;
+  line-height: 1.3;
+  transition: color 200ms ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.screensaver-card:hover .card-title {
+  color: #87CEFA;
+}
+
+/* RUNTIME VIEWPORT */
+#runtime-container {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  background-color: #000000;
+  z-index: 10000;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+#runtime-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  opacity: 1;
+  transition: opacity 250ms ease;
+}
+
+#runtime-canvas.fading {
+  opacity: 0.05;
+}
+
+/* MINIMAL TEXT-ONLY EXIT BUTTON */
+.runtime-exit-btn {
+  position: fixed;
+  top: 24px;
+  right: 28px;
+  z-index: 10001;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid rgba(135, 206, 250, 0.5);
+  color: #87CEFA;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 8px 18px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 300ms ease, border-color 200ms ease, background-color 200ms ease;
+  font-family: inherit;
+  outline: none;
+  user-select: none;
+}
+
+.runtime-exit-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.runtime-exit-btn:hover {
+  border-color: #87CEFA;
+  background-color: rgba(135, 206, 250, 0.16);
+}
+
+.runtime-exit-btn:focus-visible {
+  border-color: #FFFFFF;
+  box-shadow: 0 0 0 2px #87CEFA;
+}
+
+/* UTILITY CLASSES */
+.hidden {
+  display: none !important;
+}
+
+/* ACCESSIBILITY: REDUCED MOTION */
+@media (prefers-reduced-motion: reduce) {
+  .preview-viewport,
+  .card-title,
+  .runtime-exit-btn {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

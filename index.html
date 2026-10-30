@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>After Dark — Classic Screen Savers</title>
+    <meta name="description" content="A minimalist, high-performance dark screen saver dashboard featuring 32 classic, cinematic, scientific, and technical animations with an automatic 8-minute All Types Randomizer." />
+    <meta property="og:title" content="After Dark — Classic Screen Savers" />
+    <meta property="og:description" content="A minimalist, high-performance dark screen saver dashboard featuring 32 classic, cinematic, scientific, and technical animations with an automatic 8-minute All Types Randomizer." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- DASHBOARD -->
+    <main id="dashboard" role="main">
+      <header class="dashboard-header">
+        <h1 class="dashboard-title">After Dark</h1>
+        <p class="dashboard-subtitle">Classic, Cinematic, Scientific &amp; Technical Screen Savers</p>
+      </header>
+      
+      <div id="screensaver-categories" class="dashboard-categories" role="region" aria-label="Screen saver gallery">
+        <!-- Categories generated and managed by script.js -->
+      </div>
+    </main>
+
+    <!-- FULL-VIEWPORT RUNTIME CONTAINER -->
+    <div id="runtime-container" class="hidden" role="dialog" aria-modal="true" aria-label="Active screen saver">
+      <canvas id="runtime-canvas"></canvas>
+      <button id="runtime-exit-btn" class="runtime-exit-btn" type="button">Exit</button>
+    </div>
+
+    <script type="module" src="/script.js"></script>
+  </body>
+</html>
