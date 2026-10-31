@@ -2035,37 +2035,52 @@ function createMathematicalCurves(canvas, isPreview) {
 
         for (let i = 0; i <= numPoints; i++) {
           const t = (i / numPoints) * Math.PI * 2;
-          let x = 0;
-          let y = 0;
-
-          if (currentMode === 0) {
-            // Lissajous curve: x = A sin(a t + δ), y = B sin(b t)
-            const freqX = 3;
-            const freqY = 2;
-            const delta = time * 0.8 + layer.phaseOffset;
-            x = Math.sin(freqX * t + delta) * radius;
-            y = Math.sin(freqY * t) * radius;
-          } else if (currentMode === 1) {
-            // Rhodonea / Rose curve: r = a cos(k θ)
-            const k = 4 + Math.sin(time * 0.25) * 2;
-            const r = Math.cos(k * t + time * 0.5 + layer.phaseOffset) * radius;
-            x = r * Math.cos(t);
-            y = r * Math.sin(t);
-          } else if (currentMode === 2) {
-            // Hypocycloid: (R-r)cos(t) + d cos((R-r)t/r)
-            const R = radius;
-            const r = radius * 0.25;
-            const d = radius * 0.22 + Math.sin(time * 0.4) * (radius * 0.08);
-            x = (R - r) * Math.cos(t + layer.phaseOffset) + d * Math.cos((R - r) * t / r + time);
-            y = (R - r) * Math.sin(t + layer.phaseOffset) - d * Math.sin((R - r) * t / r + time);
-          } else {
-            // Harmonograph: multi-harmonic oscillation
-            const f1 = 2, f2 = 3;
-            const p1 = time * 0.6 + layer.phaseOffset;
-            const p2 = time * 0.4;
-            x = (Math.sin(f1 * t + p1) * 0.6 + Math.sin(f2 * t * 2 + p2) * 0.4) * radius;
-            y = (Math.cos(f2 * t + p2) * 0.6 + Math.cos(f1 * t * 2 + p1) * 0.4) * radius;
+          
+          function evaluateCurve(mode, tVal) {
+            let cxVal = 0, cyVal = 0;
+            if (mode === 0) {
+              const freqX = 3;
+              const freqY = 2;
+              const delta = time * 0.8 + layer.phaseOffset;
+              cxVal = Math.sin(freqX * tVal + delta) * radius;
+              cyVal = Math.sin(freqY * tVal) * radius;
+            } else if (mode === 1) {
+              const k = 4 + Math.sin(time * 0.25) * 2;
+              const r = Math.cos(k * tVal + time * 0.5 + layer.phaseOffset) * radius;
+              cxVal = r * Math.cos(tVal);
+              cyVal = r * Math.sin(tVal);
+            } else if (mode === 2) {
+              const R = radius;
+              const r = radius * 0.25;
+              const d = radius * 0.22 + Math.sin(time * 0.4) * (radius * 0.08);
+              cxVal = (R - r) * Math.cos(tVal + layer.phaseOffset) + d * Math.cos((R - r) * tVal / r + time);
+              cyVal = (R - r) * Math.sin(tVal + layer.phaseOffset) - d * Math.sin((R - r) * tVal / r + time);
+            } else {
+              const f1 = 2, f2 = 3;
+              const p1 = time * 0.6 + layer.phaseOffset;
+              const p2 = time * 0.4;
+              cxVal = (Math.sin(f1 * tVal + p1) * 0.6 + Math.sin(f2 * tVal * 2 + p2) * 0.4) * radius;
+              cyVal = (Math.cos(f2 * tVal + p2) * 0.6 + Math.cos(f1 * tVal * 2 + p1) * 0.4) * radius;
+            }
+            return { x: cxVal, y: cyVal };
           }
+
+          const curPt = evaluateCurve(currentMode, t);
+          const nextMode = (currentMode + 1) % MODES_COUNT;
+          const nextPt = evaluateCurve(nextMode, t);
+
+          const dur = prefersReducedMotion ? 20 : 12;
+          const prog = modeTime / dur;
+          // Smooth Hermite blend across the final 15% of the duration
+          const blendStart = 0.82;
+          let weight = 0;
+          if (prog > blendStart) {
+            const normP = (prog - blendStart) / (1.0 - blendStart);
+            weight = normP * normP * (3 - 2 * normP);
+          }
+
+          const x = curPt.x * (1 - weight) + nextPt.x * weight;
+          const y = curPt.y * (1 - weight) + nextPt.y * weight;
 
           if (i === 0) {
             context.moveTo(cx + x, cy + y);
@@ -2106,42 +2121,78 @@ function createFractalExplorer(canvas, isPreview) {
 
   const offscreen = document.createElement('canvas');
   const offCtx = offscreen.getContext('2d');
-  let offWidth = isPreview ? 140 : 256;
-  let offHeight = isPreview ? 79 : 144;
+  let offWidth = isPreview ? 140 : 260;
+  let offHeight = isPreview ? 79 : 146;
   offscreen.width = offWidth;
   offscreen.height = offHeight;
+
+  // Pre-generate rich 256-color palette LUT for instant 32-bit pixel writes
+  const palette = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let r, g, b;
+    if (t < 0.2) {
+      // Cosmic void to deep indigo
+      const p = t / 0.2;
+      r = Math.floor(4 * p);
+      g = Math.floor(10 * p);
+      b = Math.floor(35 * p);
+    } else if (t < 0.55) {
+      // Deep blue to electric Light Sky Blue (#87CEFA)
+      const p = (t - 0.2) / 0.35;
+      r = Math.floor(4 + 131 * p);
+      g = Math.floor(10 + 196 * p);
+      b = Math.floor(35 + 215 * p);
+    } else if (t < 0.85) {
+      // Light Sky Blue to icy brilliant white
+      const p = (t - 0.55) / 0.3;
+      r = Math.floor(135 + 110 * p);
+      g = Math.floor(206 + 45 * p);
+      b = 250;
+    } else {
+      // Pure radiant white core
+      const p = (t - 0.85) / 0.15;
+      r = Math.floor(245 + 10 * p);
+      g = Math.floor(251 + 4 * p);
+      b = 255;
+    }
+    // Little-endian RGBA format: (A << 24) | (B << 16) | (G << 8) | R
+    palette[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+  }
+  const interiorColor = (255 << 24) | 0x000000;
 
   return {
     resize(w, h) {
       width = w;
       height = h;
-      offWidth = isPreview ? 140 : 256;
-      offHeight = isPreview ? Math.round(offWidth * (h / w)) : Math.round(offWidth * (h / w));
-      offscreen.width = Math.max(80, offWidth);
-      offscreen.height = Math.max(45, offHeight);
+      offWidth = isPreview ? 140 : 260;
+      offHeight = Math.max(45, Math.round(offWidth * (h / (w || 1))));
+      offscreen.width = offWidth;
+      offscreen.height = offHeight;
     },
     update(dt, isHovered) {
       const motionScale = prefersReducedMotion ? 0.35 : 1.0;
-      const speedMult = (isHovered && !prefersReducedMotion ? 1.4 : 1.0) * motionScale;
+      const speedMult = (isHovered && !prefersReducedMotion ? 1.35 : 1.0) * motionScale;
       time += Math.min(dt, 0.1) * speedMult;
-      zoom = Math.exp((time * 0.28) % 4.2);
+      // Infinitely smooth continuous logarithmic zoom without abrupt reset discontinuities
+      const logZoom = 0.4 + 2.8 * (0.5 - 0.5 * Math.cos(time * 0.15));
+      zoom = Math.exp(logZoom);
     },
     draw(context, w, h) {
-      const imgData = offCtx.createImageData(offscreen.width, offscreen.height);
-      const data = imgData.data;
+      const oW = offscreen.width;
+      const oH = offscreen.height;
+      const imgData = offCtx.createImageData(oW, oH);
+      const buf32 = new Uint32Array(imgData.data.buffer);
 
-      // Orbiting complex Julia constant c
-      const cr = -0.7 + Math.sin(time * 0.18) * 0.12;
-      const ci = 0.27015 + Math.cos(time * 0.14) * 0.08;
-      const maxIter = isPreview ? 26 : 40;
+      // Smoothly evolving complex Julia parameter tracing deep spiral filaments
+      const cr = -0.742 + Math.sin(time * 0.11) * 0.08 + Math.cos(time * 0.04) * 0.02;
+      const ci = 0.188 + Math.cos(time * 0.09) * 0.07;
+      const maxIter = isPreview ? 28 : 48;
 
-      const aspect = offscreen.width / offscreen.height;
+      const aspect = oW / oH;
       const scale = 2.4 / zoom;
 
       let idx = 0;
-      const oW = offscreen.width;
-      const oH = offscreen.height;
-
       for (let y = 0; y < oH; y++) {
         const zy0 = ((y / oH) - 0.5) * scale;
         for (let x = 0; x < oW; x++) {
@@ -2159,31 +2210,29 @@ function createFractalExplorer(canvas, isPreview) {
           }
 
           if (iter === maxIter) {
-            data[idx] = 0;
-            data[idx + 1] = 0;
-            data[idx + 2] = 0;
-            data[idx + 3] = 255;
+            buf32[idx++] = interiorColor;
           } else {
-            const norm = iter / maxIter;
-            data[idx] = Math.floor(Math.min(255, norm * norm * 255 * 1.4));
-            data[idx + 1] = Math.floor(Math.min(255, norm * 206));
-            data[idx + 2] = Math.floor(Math.min(255, 100 + norm * 155));
-            data[idx + 3] = 255;
+            // Smooth fractional iteration coloring for artifact-free gradients
+            const zn = Math.sqrt(zx * zx + zy * zy);
+            const nu = Math.log(Math.log(Math.max(1, zn)) / Math.log(2)) / Math.log(2);
+            const smoothIter = Math.max(0, iter + 1 - nu);
+            const colorIdx = Math.floor((smoothIter / maxIter) * 255) & 0xff;
+            buf32[idx++] = palette[colorIdx];
           }
-          idx += 4;
         }
       }
 
       offCtx.putImageData(imgData, 0, 0);
 
       context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
       context.drawImage(offscreen, 0, 0, w, h);
 
       if (!isPreview) {
-        context.fillStyle = 'rgba(135, 206, 250, 0.7)';
+        context.fillStyle = 'rgba(135, 206, 250, 0.75)';
         context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
         context.textAlign = 'left';
-        context.fillText(`FRACTAL JULIA SET: z ↦ z² + (${cr.toFixed(3)} + ${ci.toFixed(3)}i) | ZOOM: ${zoom.toFixed(1)}x`, 28, h - 28);
+        context.fillText(`FRACTAL JULIA EXPLORER: z ↦ z² + (${cr.toFixed(3)} + ${ci.toFixed(3)}i) | CONTINUOUS ZOOM: ${zoom.toFixed(1)}x`, 28, h - 28);
       }
     },
     destroy() {}
@@ -2382,8 +2431,9 @@ function createWaveInterference(canvas, isPreview) {
               context.lineTo(px, py);
             }
           }
-          context.strokeStyle = `rgba(135, 206, 250, ${(0.15 + (r % 2 === 0 ? 0.35 : 0.15)).toFixed(2)})`;
-          context.lineWidth = isPreview ? 1.0 : 1.4;
+          const fringeAlpha = Math.max(0.12, Math.min(0.9, 0.2 + (r % 2 === 0 ? 0.35 : 0.15)));
+          context.strokeStyle = `rgba(135, 206, 250, ${fringeAlpha.toFixed(2)})`;
+          context.lineWidth = isPreview ? 1.0 : 1.5;
           context.stroke();
         }
       }
@@ -2898,9 +2948,10 @@ function createReactionDiffusion(canvas, isPreview) {
   let width = 0;
   let height = 0;
   let time = 0;
+  let seedTimer = 0;
 
-  const simW = isPreview ? 96 : 144;
-  const simH = isPreview ? 54 : 81;
+  const simW = isPreview ? 112 : 160;
+  const simH = isPreview ? 63 : 90;
 
   let u = new Float32Array(simW * simH);
   let v = new Float32Array(simW * simH);
@@ -2912,21 +2963,50 @@ function createReactionDiffusion(canvas, isPreview) {
   offscreen.width = simW;
   offscreen.height = simH;
 
+  // Pre-generate 256-entry cyan/white luminescence palette
+  const palette = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let r, g, b;
+    if (t < 0.15) {
+      r = Math.floor(t * 15);
+      g = Math.floor(t * 25);
+      b = Math.floor(t * 60);
+    } else if (t < 0.65) {
+      const p = (t - 0.15) / 0.5;
+      r = Math.floor(2 + p * 133);
+      g = Math.floor(8 + p * 198);
+      b = Math.floor(30 + p * 220);
+    } else {
+      const p = (t - 0.65) / 0.35;
+      r = Math.floor(135 + p * 120);
+      g = Math.floor(206 + p * 49);
+      b = 250;
+    }
+    palette[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+  }
+
+  function seedDrop(cx, cy, rad) {
+    for (let y = Math.max(0, cy - rad); y < Math.min(simH, cy + rad); y++) {
+      for (let x = Math.max(0, cx - rad); x < Math.min(simW, cx + rad); x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy <= rad * rad) {
+          const idx = y * simW + x;
+          v[idx] = 0.95;
+          u[idx] = 0.35;
+        }
+      }
+    }
+  }
+
   function initSim() {
     u.fill(1.0);
     v.fill(0.0);
-
-    for (let c = 0; c < 8; c++) {
+    for (let c = 0; c < 12; c++) {
       const cx = Math.floor(Math.random() * simW);
       const cy = Math.floor(Math.random() * simH);
-      const rad = 3 + Math.floor(Math.random() * 4);
-      for (let y = Math.max(0, cy - rad); y < Math.min(simH, cy + rad); y++) {
-        for (let x = Math.max(0, cx - rad); x < Math.min(simW, cx + rad); x++) {
-          const idx = y * simW + x;
-          v[idx] = 1.0;
-          u[idx] = 0.5;
-        }
-      }
+      seedDrop(cx, cy, 3 + Math.floor(Math.random() * 4));
     }
   }
 
@@ -2939,29 +3019,45 @@ function createReactionDiffusion(canvas, isPreview) {
     },
     update(dt, isHovered) {
       const motionScale = prefersReducedMotion ? 0.35 : 1.0;
-      const speedMult = (isHovered && !prefersReducedMotion ? 1.3 : 1.0) * motionScale;
-      time += Math.min(dt, 0.1) * speedMult;
+      const speedMult = (isHovered && !prefersReducedMotion ? 1.35 : 1.0) * motionScale;
+      const effectiveDt = Math.min(dt, 0.08) * speedMult;
+      time += effectiveDt;
 
-      const f = 0.034 + Math.sin(time * 0.15) * 0.012;
-      const k = 0.063 + Math.cos(time * 0.12) * 0.005;
+      // Continuously drifting feed and kill parameters across the Solitons & Labyrinths regime
+      const f = 0.036 + Math.sin(time * 0.14) * 0.010;
+      const k = 0.062 + Math.cos(time * 0.11) * 0.004;
 
       const Du = 0.2097;
       const Dv = 0.105;
 
-      const subSteps = isPreview ? 4 : 6;
-      for (let step = 0; step < subSteps; step++) {
-        for (let y = 1; y < simH - 1; y++) {
-          const row = y * simW;
-          const upRow = (y - 1) * simW;
-          const downRow = (y + 1) * simW;
+      seedTimer += effectiveDt;
+      if (seedTimer > 6.0) {
+        seedTimer = 0;
+        // Inject organic perturbation seeds to guarantee active perpetual growth
+        seedDrop(
+          Math.floor(Math.random() * simW),
+          Math.floor(Math.random() * simH),
+          2 + Math.floor(Math.random() * 3)
+        );
+      }
 
-          for (let x = 1; x < simW - 1; x++) {
+      const subSteps = isPreview ? 5 : 8;
+      for (let step = 0; step < subSteps; step++) {
+        for (let y = 0; y < simH; y++) {
+          const row = y * simW;
+          const upRow = ((y - 1 + simH) % simH) * simW;
+          const downRow = ((y + 1) % simH) * simW;
+
+          for (let x = 0; x < simW; x++) {
+            const leftX = (x - 1 + simW) % simW;
+            const rightX = (x + 1) % simW;
             const idx = row + x;
+
             const uVal = u[idx];
             const vVal = v[idx];
 
-            const lapU = u[row + x - 1] + u[row + x + 1] + u[upRow + x] + u[downRow + x] - 4 * uVal;
-            const lapV = v[row + x - 1] + v[row + x + 1] + v[upRow + x] + v[downRow + x] - 4 * vVal;
+            const lapU = u[row + leftX] + u[row + rightX] + u[upRow + x] + u[downRow + x] - 4 * uVal;
+            const lapV = v[row + leftX] + v[row + rightX] + v[upRow + x] + v[downRow + x] - 4 * vVal;
 
             const uvv = uVal * vVal * vVal;
 
@@ -2975,29 +3071,26 @@ function createReactionDiffusion(canvas, isPreview) {
     },
     draw(context, w, h) {
       const imgData = offCtx.createImageData(simW, simH);
-      const data = imgData.data;
+      const buf32 = new Uint32Array(imgData.data.buffer);
 
-      let pIdx = 0;
       for (let i = 0; i < simW * simH; i++) {
         const val = Math.max(0, Math.min(1, u[i] - v[i]));
         const inv = 1 - val;
-        data[pIdx] = Math.floor(inv * inv * 180);
-        data[pIdx + 1] = Math.floor(inv * 210);
-        data[pIdx + 2] = Math.floor(inv * 255);
-        data[pIdx + 3] = 255;
-        pIdx += 4;
+        const colorIdx = Math.floor(inv * 255) & 0xff;
+        buf32[i] = palette[colorIdx];
       }
 
       offCtx.putImageData(imgData, 0, 0);
 
       context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
       context.drawImage(offscreen, 0, 0, w, h);
 
       if (!isPreview) {
-        context.fillStyle = 'rgba(135, 206, 250, 0.7)';
+        context.fillStyle = 'rgba(135, 206, 250, 0.75)';
         context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
         context.textAlign = 'left';
-        context.fillText('REACTION-DIFFUSION: ∂u/∂t = D_u∇²u - uv² + F(1-u) [GRAY-SCOTT MODEL]', 28, h - 28);
+        context.fillText('REACTION-DIFFUSION: GRAY-SCOTT TURING PATTERNS [∂u/∂t = D_u∇²u - uv² + F(1-u)]', 28, h - 28);
       }
     },
     destroy() {
@@ -3133,15 +3226,12 @@ function createMitosis(canvas, isPreview) {
   let height = 0;
   let time = 0;
 
-  const STAGES = [
-    { name: 'PROPHASE', desc: 'Chromatin condenses into chromosomes, centrosomes separate' },
-    { name: 'METAPHASE', desc: 'Chromosomes align along equatorial metaphase plate' },
-    { name: 'ANAPHASE', desc: 'Spindle fibers pull sister chromatids to opposite poles' },
-    { name: 'TELOPHASE', desc: 'Nuclear envelopes reform, chromosomes decondense' },
-    { name: 'CYTOKINESIS', desc: 'Cleavage furrow pinches cell into two daughter cells' }
-  ];
+  const CYCLE_TIME = 24.0; // 24-second continuous full mitotic cycle
 
-  const STAGE_DURATION = 5.0;
+  function smoothstep(e0, e1, x) {
+    const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  }
 
   return {
     resize(w, h) {
@@ -3161,101 +3251,152 @@ function createMitosis(canvas, isPreview) {
       const cy = h / 2;
       const cellR = Math.min(w, h) * (isPreview ? 0.35 : 0.32);
 
-      const cycleTime = time % (STAGES.length * STAGE_DURATION);
-      const stageIdx = Math.floor(cycleTime / STAGE_DURATION);
-      const stageProgress = (cycleTime % STAGE_DURATION) / STAGE_DURATION;
-      const stage = STAGES[stageIdx];
+      const p = (time % CYCLE_TIME) / CYCLE_TIME; // Continuous cycle parameter [0, 1)
 
-      context.strokeStyle = 'rgba(135, 206, 250, 0.7)';
-      context.lineWidth = isPreview ? 2 : 3;
+      // Cell Membrane Kinematics:
+      // In early stages (p < 0.4), spherical to slight oval
+      // In anaphase/telophase (p = 0.4 to 0.75), elongates horizontally
+      // In cytokinesis (p = 0.75 to 1.0), cleavage furrow pinches inward
+      const elongation = 1.0 + smoothstep(0.35, 0.65, p) * 0.45 - smoothstep(0.9, 1.0, p) * 0.45;
+      const pinchProg = smoothstep(0.68, 0.92, p) * (1.0 - smoothstep(0.96, 1.0, p));
+      const pinchDepth = pinchProg * (cellR * 0.85);
 
-      if (stageIdx === 4) {
-        const pinch = Math.sin(stageProgress * Math.PI * 0.5) * (cellR * 0.75);
-        const sep = stageProgress * (cellR * 0.45);
+      context.strokeStyle = 'rgba(135, 206, 250, 0.8)';
+      context.lineWidth = isPreview ? 2.0 : 3.0;
+
+      if (pinchDepth > 1) {
+        // Double lobed cleavage furrow
+        const leftCenter = cx - pinchProg * cellR * 0.38;
+        const rightCenter = cx + pinchProg * cellR * 0.38;
+        const lobeR = cellR * (0.9 - pinchProg * 0.2);
 
         context.beginPath();
-        context.arc(cx - cellR * 0.5 - sep, cy, cellR * 0.55, 0, Math.PI * 2);
-        context.stroke();
-
-        context.beginPath();
-        context.arc(cx + cellR * 0.5 + sep, cy, cellR * 0.55, 0, Math.PI * 2);
+        // Top pinch bridge
+        context.moveTo(cx, cy - cellR + pinchDepth);
+        context.bezierCurveTo(leftCenter, cy - lobeR, leftCenter - lobeR, cy - lobeR * 0.6, leftCenter - lobeR, cy);
+        context.bezierCurveTo(leftCenter - lobeR, cy + lobeR * 0.6, leftCenter, cy + lobeR, cx, cy + cellR - pinchDepth);
+        // Bottom pinch bridge to right lobe
+        context.bezierCurveTo(rightCenter, cy + lobeR, rightCenter + lobeR, cy + lobeR * 0.6, rightCenter + lobeR, cy);
+        context.bezierCurveTo(rightCenter + lobeR, cy - lobeR * 0.6, rightCenter, cy - lobeR, cx, cy - cellR + pinchDepth);
         context.stroke();
       } else {
-        const stretchX = stageIdx >= 2 ? (1 + (stageIdx - 1) * 0.25) : 1;
-        const pinchY = stageIdx === 3 ? (1 - stageProgress * 0.25) : 1;
-
         context.beginPath();
-        context.ellipse(cx, cy, cellR * stretchX, cellR * pinchY, 0, 0, Math.PI * 2);
+        context.ellipse(cx, cy, cellR * elongation, cellR, 0, 0, Math.PI * 2);
         context.stroke();
       }
 
-      const poleDist = cellR * (stageIdx >= 2 ? 1.1 : 0.85);
-      const leftPole = { x: cx - poleDist, y: cy };
-      const rightPole = { x: cx + poleDist, y: cy };
+      // Centrosome migration: Start close in prophase, migrate to poles (-x, +x)
+      const poleSeparation = smoothstep(0.0, 0.22, p) * cellR * 0.88 * elongation;
+      const leftPole = { x: cx - poleSeparation, y: cy };
+      const rightPole = { x: cx + poleSeparation, y: cy };
 
+      // Render glowing centrosome aster rays
       context.fillStyle = '#fde047';
       context.beginPath();
-      context.arc(leftPole.x, leftPole.y, 4, 0, Math.PI * 2);
-      context.arc(rightPole.x, rightPole.y, 4, 0, Math.PI * 2);
+      context.arc(leftPole.x, leftPole.y, isPreview ? 3 : 4.5, 0, Math.PI * 2);
+      context.arc(rightPole.x, rightPole.y, isPreview ? 3 : 4.5, 0, Math.PI * 2);
       context.fill();
 
-      context.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+      // Aster microtubule rays
+      context.strokeStyle = 'rgba(253, 224, 71, 0.3)';
       context.lineWidth = 0.8;
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2 + time * 0.5;
+        const rayLen = isPreview ? 8 : 14;
+        context.beginPath();
+        context.moveTo(leftPole.x, leftPole.y);
+        context.lineTo(leftPole.x + Math.cos(ang) * rayLen, leftPole.y + Math.sin(ang) * rayLen);
+        context.moveTo(rightPole.x, rightPole.y);
+        context.lineTo(rightPole.x + Math.cos(ang) * rayLen, rightPole.y + Math.sin(ang) * rayLen);
+        context.stroke();
+      }
+
+      // 4 Chromosome pairs kinematics
       const numChromosomes = 4;
-
       for (let c = 0; c < numChromosomes; c++) {
-        const cOffset = (c - (numChromosomes - 1) / 2) * (cellR * 0.38);
+        const cOffset = (c - (numChromosomes - 1) / 2) * (cellR * 0.36);
 
-        if (stageIdx === 0) {
-          context.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-          context.beginPath();
-          context.arc(cx, cy, cellR * 0.5, 0, Math.PI * 2);
-          context.stroke();
+        // Continuous trajectory calculation:
+        // Prophase (p: 0 -> 0.22): Scattered around center -> moving towards equatorial plane
+        // Metaphase (p: 0.22 -> 0.42): Locked onto plate x = cx, oscillating slightly
+        // Anaphase (p: 0.42 -> 0.68): Splitting and pulling apart towards poles
+        // Telophase (p: 0.68 -> 0.88): Reaching poles, beginning decondensation
+        // Cytokinesis (p: 0.88 -> 1.0): Fully enveloped in daughter cells
 
-          const x = cx + (Math.sin(c * 2 + time) * (cellR * 0.25));
-          const y = cy + cOffset * 0.6;
-          drawChromatidX(context, x, y, 10);
-        } else if (stageIdx === 1) {
-          const y = cy + cOffset;
+        const condenseProg = smoothstep(0.0, 0.22, p);
+        const metaAlign = smoothstep(0.18, 0.28, p);
+        const anaphasePull = smoothstep(0.42, 0.65, p);
+        const decondenseProg = smoothstep(0.85, 1.0, p);
+
+        // Pre-metaphase wandering coordinates
+        const wanderX = cx + Math.sin(c * 2.3 + time * 1.5) * (cellR * 0.35) * (1.0 - metaAlign);
+        const wanderY = cy + cOffset * 0.8 + Math.cos(c * 1.7 + time) * 8 * (1.0 - metaAlign);
+
+        const plateX = cx + Math.sin(time * 3 + c) * 3;
+        const plateY = cy + cOffset;
+
+        // Base position before split
+        const baseX = wanderX * (1 - metaAlign) + plateX * metaAlign;
+        const baseY = wanderY * (1 - metaAlign) + plateY * metaAlign;
+
+        const maxPull = cellR * 0.55 * elongation;
+        const pullDistance = anaphasePull * maxPull;
+
+        const leftX = baseX - pullDistance;
+        const rightX = baseX + pullDistance;
+
+        // Spindle fibers connecting poles to centromeres
+        if (condenseProg > 0.4 && decondenseProg < 0.8) {
+          const fiberAlpha = (smoothstep(0.3, 0.45, p) * (1.0 - smoothstep(0.72, 0.88, p))) * 0.35;
+          context.strokeStyle = `rgba(135, 206, 250, ${fiberAlpha})`;
+          context.lineWidth = 1.0;
           context.beginPath();
           context.moveTo(leftPole.x, leftPole.y);
-          context.lineTo(cx, y);
+          context.lineTo(leftX, baseY);
           context.moveTo(rightPole.x, rightPole.y);
-          context.lineTo(cx, y);
+          context.lineTo(rightX, baseY);
           context.stroke();
+        }
 
-          drawChromatidX(context, cx, y, 12);
-        } else if (stageIdx === 2) {
-          const pullDist = stageProgress * (cellR * 0.6);
-          const y = cy + cOffset;
-
-          const lx = cx - pullDist;
-          context.beginPath();
-          context.moveTo(leftPole.x, leftPole.y);
-          context.lineTo(lx, y);
-          context.stroke();
-          drawChromatidV(context, lx, y, 10, -1);
-
-          const rx = cx + pullDist;
-          context.beginPath();
-          context.moveTo(rightPole.x, rightPole.y);
-          context.lineTo(rx, y);
-          context.stroke();
-          drawChromatidV(context, rx, y, 10, 1);
+        // Draw chromatids
+        if (anaphasePull < 0.05) {
+          // Single paired X-shaped chromosome
+          const size = (isPreview ? 8 : 12) * condenseProg;
+          if (size > 1) {
+            drawChromatidX(context, baseX, baseY, size);
+          }
         } else {
-          const sep = (stageIdx === 3 ? cellR * 0.6 : (cellR * 0.6 + stageProgress * 20));
-          const y = cy + cOffset * 0.5;
-
-          drawChromatidV(context, cx - sep, y, 8, -1);
-          drawChromatidV(context, cx + sep, y, 8, 1);
+          // Sister chromatids separated into V-shapes pulled toward opposite poles
+          const vSize = (isPreview ? 7 : 11) * (1.0 - decondenseProg * 0.4);
+          drawChromatidV(context, leftX, baseY, vSize, -1);
+          drawChromatidV(context, rightX, baseY, vSize, 1);
         }
       }
 
+      // Dynamic Phase Caption
       if (!isPreview) {
+        let phaseName, phaseDesc;
+        if (p < 0.22) {
+          phaseName = 'PROPHASE';
+          phaseDesc = 'Chromatin condenses into distinct chromosomes; centrosomes migrate to poles';
+        } else if (p < 0.42) {
+          phaseName = 'METAPHASE';
+          phaseDesc = 'Chromosomes align along equatorial metaphase plate; spindle attachment complete';
+        } else if (p < 0.65) {
+          phaseName = 'ANAPHASE';
+          phaseDesc = 'Microtubules pull sister chromatids apart toward opposite centrosome poles';
+        } else if (p < 0.85) {
+          phaseName = 'TELOPHASE';
+          phaseDesc = 'Nuclear envelopes reform around daughter chromatid sets; cell elongates';
+        } else {
+          phaseName = 'CYTOKINESIS';
+          phaseDesc = 'Cleavage furrow pinches membrane dividing parent into two daughter cells';
+        }
+
         context.fillStyle = 'rgba(135, 206, 250, 0.85)';
         context.font = 'bold 12px -apple-system, BlinkMacSystemFont, monospace';
         context.textAlign = 'left';
-        context.fillText(`STAGE ${stageIdx + 1}/5: ${stage.name} — ${stage.desc}`, 28, h - 28);
+        context.fillText(`MITOSIS: ${phaseName} — ${phaseDesc} [${Math.floor(p * 100)}%]`, 28, h - 28);
       }
     },
     destroy() {}
@@ -5112,119 +5253,55 @@ function createBinary(canvas, isPreview) {
 
 /**
  * 31. BINARY ORBITS (TECHNOLOGY)
- * Three-dimensional particle-based spiral galaxy inspired by React Bits Pro Binary Orbits.
- * Tilted approximately 65 degrees in perspective with a luminous central core,
- * 4 recognizable spiral arms with thousands of stars continuously streaming outward,
- * organic velocity distribution, depth scaling, and restrained celestial palette.
+ * High-performance 3D spiral galaxy simulation inspired by React Bits Pro Binary Orbits.
+ * Tilted at ~65 degrees with continuous outward stellar streaming through 4 logarithmic spiral arms,
+ * a luminous galactic core with exponential star density, and smooth recirculation.
  */
 function createBinaryOrbits(canvas, isPreview) {
   let width = 0;
   let height = 0;
   let time = 0;
-  let galaxyRot = 0;
 
-  // Particle counts: ~8,000 for preview, ~55,000 for full-screen runtime
-  const count = isPreview ? 8000 : 55000;
+  const starCount = isPreview ? 4500 : 22000;
+  // Use typed arrays for maximum cache locality and 60 FPS performance
+  const starsR = new Float32Array(starCount);
+  const starsArm = new Uint8Array(starCount);
+  const starsOffset = new Float32Array(starCount);
+  const starsZOffset = new Float32Array(starCount);
+  const starsSpeed = new Float32Array(starCount);
+  const starsSize = new Float32Array(starCount);
+  const starsColor = new Uint8Array(starCount); // 0: core bright, 1: arm cyan, 2: outer blue, 3: white
 
-  // High performance typed arrays
-  const radii = new Float32Array(count);
-  const phases = new Float32Array(count);
-  const arms = new Uint8Array(count);
-  const zOffsets = new Float32Array(count);
-  const speeds = new Float32Array(count);
-  const sizes = new Float32Array(count);
-  const colorTypes = new Uint8Array(count); // 0: White, 1: Pale Blue, 2: Electric Light Blue, 3: Core Warm/Gold
+  const NUM_ARMS = 4;
+  const TILT = 65 * (Math.PI / 180); // 65 degree tilt
+  const cosTilt = Math.cos(TILT);
+  const sinTilt = Math.sin(TILT);
 
-  // Pre-rendered radial glow sprites for maximum 60fps rendering efficiency
-  const spriteCanvases = [];
-
-  function createGlowSprite(color, r) {
-    const sCanvas = document.createElement('canvas');
-    const sSize = r * 2;
-    sCanvas.width = sSize;
-    sCanvas.height = sSize;
-    const sCtx = sCanvas.getContext('2d');
-    const grad = sCtx.createRadialGradient(r, r, 0, r, r, r);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.35, color);
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    sCtx.fillStyle = grad;
-    sCtx.beginPath();
-    sCtx.arc(r, r, r, 0, Math.PI * 2);
-    sCtx.fill();
-    return sCanvas;
-  }
-
-  // Pre-render star sprites
-  const spriteWhite = createGlowSprite('rgba(255, 255, 255, 0.9)', 8);
-  const spritePaleBlue = createGlowSprite('rgba(186, 230, 253, 0.85)', 8);
-  const spriteCyan = createGlowSprite('rgba(135, 206, 250, 0.95)', 8);
-  const spriteWarm = createGlowSprite('rgba(254, 240, 138, 0.9)', 8);
-  spriteCanvases[0] = spriteWhite;
-  spriteCanvases[1] = spritePaleBlue;
-  spriteCanvases[2] = spriteCyan;
-  spriteCanvases[3] = spriteWarm;
-
-  // Distant background stars
-  const bgStars = [];
-  function initBgStars(w, h) {
-    bgStars.length = 0;
-    const numBg = isPreview ? 25 : 80;
-    for (let i = 0; i < numBg; i++) {
-      bgStars.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        r: Math.random() * 1.2 + 0.4,
-        alpha: Math.random() * 0.4 + 0.2
-      });
+  function resetStar(i, initial) {
+    const isCore = Math.random() < 0.28;
+    if (isCore) {
+      starsR[i] = initial ? Math.pow(Math.random(), 2.2) * 0.32 : Math.random() * 0.08;
+      starsArm[i] = Math.floor(Math.random() * NUM_ARMS);
+      starsOffset[i] = (Math.random() - 0.5) * 0.8;
+      starsZOffset[i] = (Math.random() - 0.5) * 0.12;
+      starsSpeed[i] = 0.04 + Math.random() * 0.05;
+      starsSize[i] = 0.8 + Math.random() * 1.5;
+      starsColor[i] = Math.random() < 0.6 ? 0 : 3;
+    } else {
+      starsR[i] = initial ? 0.1 + Math.random() * 0.9 : 0.08 + Math.random() * 0.05;
+      starsArm[i] = Math.floor(Math.random() * NUM_ARMS);
+      starsOffset[i] = (Math.random() - 0.5) * 0.42;
+      starsZOffset[i] = (Math.random() - 0.5) * 0.08 * (1.0 - starsR[i] * 0.5);
+      starsSpeed[i] = 0.03 + Math.random() * 0.045;
+      starsSize[i] = 0.6 + Math.random() * 1.2;
+      const cRand = Math.random();
+      starsColor[i] = cRand < 0.5 ? 1 : (cRand < 0.8 ? 2 : 3);
     }
   }
 
-  let maxGalaxyRadius = 300;
-  const NUM_ARMS = 4;
-  const TILT_ANGLE = 65 * (Math.PI / 180); // ~1.134 radians (~65 degrees tilt)
-  const COS_TILT = Math.cos(TILT_ANGLE);
-  const SIN_TILT = Math.sin(TILT_ANGLE);
-
-  function initParticles(w, h) {
-    maxGalaxyRadius = Math.min(w, h) * (isPreview ? 0.44 : 0.46);
-    initBgStars(w, h);
-
-    for (let i = 0; i < count; i++) {
-      // Exponential distribution: denser toward the galactic core
-      const rRatio = Math.pow(Math.random(), 1.6);
-      const r = rRatio * maxGalaxyRadius;
-      radii[i] = r;
-
-      // 4 recognizable spiral arms
-      const arm = Math.floor(Math.random() * NUM_ARMS);
-      arms[i] = arm;
-
-      // Particle phase dispersion: tight near core, expanding slightly outward
-      const armSpread = 0.22 + 0.38 * (r / maxGalaxyRadius);
-      phases[i] = (Math.random() - 0.5) * armSpread;
-
-      // Disc vertical thickness: thick spherical bulge at center, thinning into disc
-      const coreBulge = Math.max(0, 1.0 - r / (maxGalaxyRadius * 0.3));
-      const discThickness = maxGalaxyRadius * (0.08 + coreBulge * 0.18);
-      zOffsets[i] = (Math.random() - 0.5) * discThickness;
-
-      // Orbital stream speed: faster in inner region, sustained along arms
-      speeds[i] = (0.035 + 0.05 * (1.0 - r / maxGalaxyRadius)) * maxGalaxyRadius;
-
-      // Particle size
-      const baseSz = (isPreview ? 1.0 : 1.4) + Math.random() * (isPreview ? 1.4 : 2.2);
-      sizes[i] = (r < maxGalaxyRadius * 0.12) ? baseSz * 1.5 : baseSz;
-
-      // Color classification
-      if (r < maxGalaxyRadius * 0.15 && Math.random() < 0.35) {
-        colorTypes[i] = 3; // Warm stellar core
-      } else {
-        const randCol = Math.random();
-        if (randCol < 0.45) colorTypes[i] = 0; // Pure white
-        else if (randCol < 0.75) colorTypes[i] = 1; // Pale blue
-        else colorTypes[i] = 2; // Electric cyan #87CEFA
-      }
+  function initGalaxy() {
+    for (let i = 0; i < starCount; i++) {
+      resetStar(i, true);
     }
   }
 
@@ -5232,126 +5309,103 @@ function createBinaryOrbits(canvas, isPreview) {
     resize(w, h) {
       width = w;
       height = h;
-      initParticles(w, h);
+      initGalaxy();
     },
     update(dt, isHovered) {
-      const motionScale = prefersReducedMotion ? 0.3 : 1.0;
+      const motionScale = prefersReducedMotion ? 0.35 : 1.0;
       const speedMult = (isHovered && !prefersReducedMotion ? 1.35 : 1.0) * motionScale;
       const stepDt = Math.min(dt, 0.08) * speedMult;
       time += stepDt;
 
-      // Overall galaxy rotation
-      galaxyRot += stepDt * 0.07;
-
-      const twist = 3.2 / maxGalaxyRadius;
-
-      // Continuous stellar streaming along spiral arms
-      for (let i = 0; i < count; i++) {
-        radii[i] += speeds[i] * stepDt;
-
-        // When a star leaves the outer galaxy edge, recirculate smoothly into the core
-        if (radii[i] > maxGalaxyRadius) {
-          radii[i] = Math.random() * (maxGalaxyRadius * 0.06);
-          arms[i] = (arms[i] + 1) % NUM_ARMS;
-          phases[i] = (Math.random() - 0.5) * 0.22;
-          const coreBulge = 1.0;
-          const discThickness = maxGalaxyRadius * (0.08 + coreBulge * 0.18);
-          zOffsets[i] = (Math.random() - 0.5) * discThickness;
+      for (let i = 0; i < starCount; i++) {
+        starsR[i] += starsSpeed[i] * stepDt;
+        if (starsR[i] >= 1.0) {
+          resetStar(i, false);
         }
       }
     },
     draw(context, w, h) {
-      // Pure deep space black
       context.fillStyle = '#000000';
       context.fillRect(0, 0, w, h);
 
-      // Faint distant background stars
-      for (let s of bgStars) {
-        context.fillStyle = `rgba(255, 255, 255, ${s.alpha})`;
-        context.beginPath();
-        context.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-        context.fill();
-      }
-
       const cx = w / 2;
       const cy = h / 2;
-      const twist = 3.2 / maxGalaxyRadius;
+      const galaxyRadius = Math.min(w, h) * (isPreview ? 0.44 : 0.48);
 
-      // Galactic Core Soft Luminous Glow (Multi-pass radial glow)
-      const coreR = maxGalaxyRadius * 0.32;
-      const coreGlow = context.createRadialGradient(cx, cy, 2, cx, cy, coreR);
-      coreGlow.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
-      coreGlow.addColorStop(0.2, 'rgba(254, 240, 138, 0.65)');
-      coreGlow.addColorStop(0.5, 'rgba(135, 206, 250, 0.35)');
-      coreGlow.addColorStop(0.8, 'rgba(56, 189, 248, 0.1)');
-      coreGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      // Core glow aura
+      const coreR = galaxyRadius * 0.28;
+      const coreGrad = context.createRadialGradient(cx, cy, 2, cx, cy, coreR);
+      coreGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+      coreGrad.addColorStop(0.2, 'rgba(224, 242, 254, 0.8)');
+      coreGrad.addColorStop(0.5, 'rgba(135, 206, 250, 0.35)');
+      coreGrad.addColorStop(0.8, 'rgba(56, 189, 248, 0.12)');
+      coreGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
 
       context.save();
-      // Elliptical core glow matching 65-degree tilt
       context.translate(cx, cy);
-      context.scale(1.0, COS_TILT);
-      context.fillStyle = coreGlow;
+      context.scale(1.0, cosTilt);
+      context.fillStyle = coreGrad;
       context.beginPath();
       context.arc(0, 0, coreR, 0, Math.PI * 2);
       context.fill();
       context.restore();
 
-      // 3D Perspective Projection for ~55,000 Stars
-      const fov = Math.max(w, h) * 1.5;
-      const armAngleStep = (Math.PI * 2) / NUM_ARMS;
+      const b = 0.55;
+      const rotBase = time * 0.35;
 
-      // Batch render stars using pre-rendered sprites
-      for (let i = 0; i < count; i++) {
-        const r = radii[i];
-        const armOffset = arms[i] * armAngleStep;
-        const theta = galaxyRot + r * twist + armOffset + phases[i];
+      const colors = [
+        '#ffffff',
+        '#87CEFA',
+        'rgba(56, 189, 248, 0.8)',
+        'rgba(240, 249, 255, 0.9)'
+      ];
 
-        // 3D coordinates in galaxy plane
-        const x0 = r * Math.cos(theta);
-        const y0 = r * Math.sin(theta);
-        const z0 = zOffsets[i];
+      for (let i = 0; i < starCount; i++) {
+        const rNorm = starsR[i];
+        const r = rNorm * galaxyRadius;
 
-        // Rotate by 65 degrees around X-axis
-        const y1 = y0 * COS_TILT - z0 * SIN_TILT;
-        const z1 = y0 * SIN_TILT + z0 * COS_TILT;
+        const armAngle = (starsArm[i] * (Math.PI * 2 / NUM_ARMS));
+        const spiralAngle = Math.log(Math.max(0.04, rNorm)) * b + armAngle + starsOffset[i] + rotBase;
 
-        // Perspective scale & depth
-        const pScale = fov / (fov + z1);
-        const px = cx + x0 * pScale;
-        const py = cy + y1 * pScale;
+        const gx = Math.cos(spiralAngle) * r;
+        const gy = Math.sin(spiralAngle) * r;
+        const gz = starsZOffset[i] * galaxyRadius;
 
-        // Skip particles outside viewport
-        if (px < -20 || px > w + 20 || py < -20 || py > h + 20) continue;
+        const px = cx + gx;
+        const py = cy + (gy * cosTilt - gz * sinTilt);
+        const pz = gy * sinTilt + gz * cosTilt;
 
-        const sz = Math.max(0.6, sizes[i] * pScale);
-        const sprite = spriteCanvases[colorTypes[i]];
+        const depthFactor = 0.7 + (pz / galaxyRadius) * 0.35;
+        const alpha = Math.max(0.12, Math.min(1.0, (1.0 - rNorm * 0.45) * depthFactor));
+        const size = starsSize[i] * (isPreview ? 0.7 : 1.0) * depthFactor;
 
-        if (sz < 1.2) {
-          // Fast point draw for micro stars
-          context.fillStyle = colorTypes[i] === 2 ? '#87CEFA' : '#ffffff';
-          context.fillRect(px, py, sz, sz);
+        context.globalAlpha = alpha;
+        context.fillStyle = colors[starsColor[i]];
+
+        if (size <= 1.2) {
+          context.fillRect(px, py, size, size);
         } else {
-          // Pre-rendered luminous glow sprite
-          context.drawImage(sprite, px - sz, py - sz, sz * 2, sz * 2);
+          context.beginPath();
+          context.arc(px, py, size, 0, Math.PI * 2);
+          context.fill();
         }
       }
 
-      // Runtime subtitle
+      context.globalAlpha = 1.0;
+
       if (!isPreview) {
         context.fillStyle = 'rgba(135, 206, 250, 0.75)';
         context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
         context.textAlign = 'left';
-        context.fillText('ASTROPHYSICS: BINARY ORBITS — 3D SPIRAL GALAXY & STELLAR DISK [65° TILT]', 28, h - 28);
+        context.fillText('BINARY ORBITS: 3D SPIRAL GALAXY (TILT 65°) — 4 LOGARITHMIC ARMS & STELLAR STREAMING', 28, h - 28);
       }
     },
-    destroy() {
-      bgStars.length = 0;
-    }
+    destroy() {}
   };
 }
 
 /**
- * 32. HEXA (TECHNOLOGY)
+ * 31. HEXA (TECHNOLOGY)
  * 64-bit Hexadecimal memory dump inspector with real-time streaming addresses,
  * 16-byte hex rows, ASCII translation column, instruction pointer (RIP) frames,
  * and memory segment highlights.
@@ -5753,17 +5807,17 @@ function createRandomizerPreview(canvas, isPreview) {
 
   // Sampler engines to cycle through across categories
   const toasters = createFlyingToasters(canvas, true);
-  const binaryOrbits = createBinaryOrbits(canvas, true);
   const spiderMan = createSpiderMan(canvas, true);
   const interstellar = createInterstellar(canvas, true);
   const ocean = createUnderTheOcean(canvas, true);
   const fusion = createNuclearFusion(canvas, true);
   const tech = createTech(canvas, true);
   const computer = createComputer(canvas, true);
+  const orbits = createBinaryOrbits(canvas, true);
   const terminal = createTerminal(canvas, true);
   const dna = createDNADoubleHelix(canvas, true);
   const math = createMathematicalCurves(canvas, true);
-  const samplers = [toasters, binaryOrbits, spiderMan, interstellar, ocean, fusion, tech, computer, terminal, dna, math];
+  const samplers = [toasters, spiderMan, interstellar, ocean, fusion, tech, computer, orbits, terminal, dna, math];
 
   return {
     resize(w, h, dpr) {
