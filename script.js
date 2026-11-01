@@ -99,7 +99,7 @@ const CATEGORIES = [
     id: 'biology',
     title: 'Biology',
     savers: [
-      { id: 'dna-double-helix', title: 'DNA Double Helix (Seamless)', create: createDNADoubleHelix },
+      { id: 'dna-double-helix', title: 'DNA Double Helix (Infinite Loop)', create: createDNADoubleHelix },
       { id: 'mitosis', title: 'Mitosis', create: createMitosis }
     ]
   },
@@ -3101,37 +3101,117 @@ function createReactionDiffusion(canvas, isPreview) {
 }
 
 /**
- * 21. DNA DOUBLE HELIX (Milky Way style rebuild)
- * A seamless, infinitely scrolling B-form DNA double helix rendered in the same
- * low-RAM engine style as the Milky Way Galaxy saver: pre-rendered sprite
- * atlases, flat typed-array state, depth-sorted painter's algorithm, and
- * frame-rate-independent motion. The strand scroll distance is an exact
- * multiple of the helix pitch, so the loop is perfectly seamless.
+ * 21. DNA DOUBLE HELIX (Infinite Loop rebuild)
+ * Completely rebuilt B-form DNA double helix with a mathematically perfect
+ * infinite loop, exactly like the Classic Globe saver: the Globe returns to
+ * its starting frame because its rotation is periodic; here BOTH the helix
+ * spin and the vertical scroll complete an integer number of cycles per loop
+ * period (SPIN_TURNS rotations x SCROLL_PITCHES pitches), so the first and
+ * last frames of every cycle are pixel-identical and it loops forever.
+ *
+ * Low-RAM engine (same style as Milky Way Galaxy): flat typed-array state,
+ * pre-rendered sprite atlases (zero gradients per animation frame), cached
+ * static backdrop rebuilt only on resize, no per-frame allocations or sorts,
+ * frame-rate-independent motion, and destroy() releases every cached canvas.
  */
 function createDNADoubleHelix(canvas, isPreview) {
   let width = 0;
   let height = 0;
-  let time = 0;
+  let dpr = 1;
 
-  // ---- Helix geometry constants -------------------------------------------
-  const TWIST_PER_STEP = Math.PI / 5;      // 36 deg -> 10 steps per full turn
-  const STEP_SPACING = 34;                 // world units between base pairs
-  const PITCH = STEP_SPACING * (Math.PI * 2) / TWIST_PER_STEP; // 340 world units per full turn
-  const SCROLL_SPEED = 58;                 // world units/sec (one full turn every ~5.9s)
-  const CROSSLAP = 0.32;                   // antiparallel sugar offset (~18 deg)
-  const PHOSPHATE_R = 7.4;                 // backbone node radius (world units)
-  const GLOW_SCALE = 3.4;                  // glow sprite size relative to node
+  // ---- Infinite-loop clock ---------------------------------------------------
+  const LOOP_SECONDS = isPreview ? 26 : 58;
+  const SPIN_TURNS = 4;        // full rotations per loop (integer -> seamless)
+  const SCROLL_PITCHES = 3;    // helix pitches scrolled per loop (integer -> seamless)
+  const SWAY_CYCLES = 2;       // axis sway oscillations per loop (integer -> seamless)
+  const BREATHE_CYCLES = 3;    // radial breathing cycles per loop (integer -> seamless)
+  let phase = 0;               // normalized loop time in [0,1)
+  let totalT = 0;              // continuous seconds since start
 
-  // ---- Nucleotide palette (A=T two H-bonds, G=C three H-bonds) ------------
-  const BASES = [
-    { letter: 'A', rgb: [251, 191, 36] },   // amber
-    { letter: 'T', rgb: [96, 165, 250] },   // sky blue
-    { letter: 'G', rgb: [52, 211, 153] },   // emerald
-    { letter: 'C', rgb: [165, 180, 252] }   // indigo
-  ];
-  const COMPLEMENT = [1, 0, 3, 2];          // A-T, T-A, G-C, C-G
+  // ---- Helix geometry (world units) --------------------------------------------
+  const PITCH = 340;                    // rise per full turn
+  const RUNGS = 20;                     // base pairs per pitch period
+  const RUNG_SPACING = PITCH / RUNGS;   // 17 units between consecutive rungs
+  const WINDOW_PITCHES = 2;             // helix turns visible in the viewport height
+  const SLOTS = RUNGS * WINDOW_PITCHES; // rungs on screen (one extra turn for smooth entry/exit)
+  // Slot s displays sequence index s % RUNGS, so its base letter always matches
+  // its phase position -> the whole molecule (geometry AND letters) is periodic.
+  const BASES = 'ATCGATCGTAGCTAGCATGC'; // period 20 == RUNGS; SLOTS (40) is a multiple, so slot-shifted recycling always matches
+  const PAIR = { A: 'T', T: 'A', G: 'C', C: 'G' };
+  const BONDS = { AT: 2, TA: 2, GC: 3, CG: 3 };
 
-  // ---- Deterministic PRNG for the sequence (stable across resizes) --------
+  // ---- Flat typed-array state (no heap objects in the hot path) ----------------
+  const nodeX = new Float32Array(SLOTS * 2);
+  const nodeY = new Float32Array(SLOTS * 2);
+  const rungDepth = new Float32Array(SLOTS);
+
+  // ---- Sprite atlases ------------------------------------------------------------
+  const sprites = {};
+  function makeCanvas(w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(2, Math.ceil(w));
+    c.height = Math.max(2, Math.ceil(h || w));
+    return c;
+  }
+  function buildGlow(rgb) {
+    const S = 96, c = makeCanvas(S), g = c.getContext('2d');
+    const grad = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    grad.addColorStop(0, `rgba(${rgb},0.5)`);
+    grad.addColorStop(0.45, `rgba(${rgb},0.16)`);
+    grad.addColorStop(1, `rgba(${rgb},0)`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, S, S);
+    return c;
+  }
+  function buildNode(rgb, size, bright) {
+    const c = makeCanvas(size), g = c.getContext('2d'), h = size / 2;
+    const grad = g.createRadialGradient(h, h, 0, h, h, h);
+    grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+    grad.addColorStop(0.35, `rgba(${rgb},${bright})`);
+    grad.addColorStop(1, `rgba(${rgb},0)`);
+    g.fillStyle = grad;
+    g.beginPath();
+    g.arc(h, h, h, 0, Math.PI * 2);
+    g.fill();
+    return c;
+  }
+  function buildLetter(letter, rgb) {
+    const S = 34, c = makeCanvas(S), g = c.getContext('2d');
+    g.font = 'bold 17px "Segoe UI", system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.shadowColor = `rgba(${rgb},0.9)`;
+    g.shadowBlur = 6;
+    g.fillStyle = 'rgba(235,245,255,0.95)';
+    g.fillText(letter, S / 2, S / 2 + 1);
+    return c;
+  }
+  function buildBondStrip(bonds, tierSize) {
+    const W = 64, H = 12, c = makeCanvas(W, H), g = c.getContext('2d');
+    const r = Math.max(1.4, tierSize * 0.09);
+    for (let b = 0; b < bonds; b++) {
+      const x = W * (bonds === 1 ? 0.5 : 0.28 + 0.44 * (b / (bonds - 1)));
+      g.fillStyle = 'rgba(210,230,255,0.92)';
+      g.beginPath();
+      g.arc(x, H / 2, r, 0, Math.PI * 2);
+      g.fill();
+    }
+    return c;
+  }
+  function buildSprites() {
+    sprites.glowCyan = buildGlow('90,200,255');
+    sprites.glowRose = buildGlow('255,120,190');
+    sprites.nodeA = [buildNode('120,210,255', 26, 0.9), buildNode('120,210,255', 14, 0.75), buildNode('120,210,255', 9, 0.6)];
+    sprites.nodeB = [buildNode('255,140,200', 26, 0.9), buildNode('255,140,200', 14, 0.75), buildNode('255,140,200', 9, 0.6)];
+    sprites.letters = {};
+    for (const L of ['A', 'T', 'G', 'C']) sprites.letters[L] = buildLetter(L, '140,220,255');
+    sprites.bonds = {};
+    for (const n of [2, 3]) sprites.bonds[n] = [buildBondStrip(n, 26), buildBondStrip(n, 14), buildBondStrip(n, 9)];
+  }
+  buildSprites();
+
+  // ---- Cached static backdrop (rebuilt only on resize) ---------------------------
+  let backdrop = null;
   function mulberry32(seed) {
     return function () {
       seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
@@ -3140,266 +3220,171 @@ function createDNADoubleHelix(canvas, isPreview) {
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
-
-  // ---- Engine state --------------------------------------------------------
-  let count = 0;                            // visible rung count (rebuilt on resize)
-  const MAX_COUNT = isPreview ? 26 : 48;    // tiny footprint: <2KB of Float32 state
-  const seqIdx = new Uint8Array(MAX_COUNT); // nucleotide index on strand 1
-  const phase = new Float32Array(MAX_COUNT);// stable per-step phase jitter (visual only)
-
-  // Pre-rendered sprites (built once, reused every frame - no per-frame arcs)
-  let sprites = null;                       // soft round glows per base color
-  let nodeSprites = null;                   // sugar-phosphate backbone nodes (LOD tiers)
-  let letterSprites = null;                 // nucleotide letters baked onto rungs
-  let bondSprites = null;                   // hydrogen-bond dot strips (2 or 3 bonds)
-  const SPRITE_TIERS = [24, 40, 72];        // LOD sizes for phosphate nodes
-
-  function makeCanvas(size) {
-    const c = document.createElement('canvas');
-    c.width = size;
-    c.height = size;
-    return c;
-  }
-
-  function buildGlowSprite(rgb) {
-    const S = 72;
-    const c = makeCanvas(S);
-    const g = c.getContext('2d');
-    const grad = g.createRadialGradient(S / 2, S / 2, 1, S / 2, S / 2, S / 2);
-    grad.addColorStop(0.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 1)`);
-    grad.addColorStop(0.35, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.55)`);
-    grad.addColorStop(1.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0)`);
-    g.fillStyle = grad;
-    g.fillRect(0, 0, S, S);
-    return c;
-  }
-
-  function buildNodeSprite(rgb, size) {
-    const c = makeCanvas(size);
-    const g = c.getContext('2d');
-    const r = size / 2;
-    // Soft halo
-    const grad = g.createRadialGradient(r, r, 1, r, r, r);
-    grad.addColorStop(0.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.9)`);
-    grad.addColorStop(0.5, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.25)`);
-    grad.addColorStop(1.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0)`);
-    g.fillStyle = grad;
-    g.fillRect(0, 0, size, size);
-    // Solid core with a cool sugar-phosphate tint and specular highlight
-    g.beginPath();
-    g.arc(r, r, r * 0.52, 0, Math.PI * 2);
-    g.fillStyle = `rgb(${Math.min(255, rgb[0] + 40)}, ${Math.min(255, rgb[1] + 40)}, ${Math.min(255, rgb[2] + 40)})`;
-    g.fill();
-    g.beginPath();
-    g.arc(r - r * 0.16, r - r * 0.18, r * 0.16, 0, Math.PI * 2);
-    g.fillStyle = 'rgba(255, 255, 255, 0.85)';
-    g.fill();
-    return c;
-  }
-
-  function buildLetterSprite(letter, rgb) {
-    const S = 40;
-    const c = makeCanvas(S);
-    const g = c.getContext('2d');
-    g.font = 'bold 26px "SF Mono", Menlo, Consolas, monospace';
-    g.textAlign = 'center';
-    g.textBaseline = 'middle';
-    g.fillStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.95)`;
-    g.fillText(letter, S / 2, S / 2 + 1);
-    return c;
-  }
-
-  function buildBondSprite(bonds, tierSize) {
-    const W = Math.max(8, Math.round(tierSize * 1.6));
-    const H = Math.max(6, tierSize);
-    const c = makeCanvas(0);
-    c.width = W; c.height = H;
-    const g = c.getContext('2d');
-    g.fillStyle = 'rgba(255, 255, 255, 0.95)';
-    const dotR = Math.max(0.8, tierSize * 0.055);
-    for (let b = 0; b < bonds; b++) {
-      const oy = H * (bonds === 1 ? 0.5 : 0.3 + (b * 0.4) / (bonds - 1));
-      g.beginPath();
-      g.arc(W / 2, oy, dotR, 0, Math.PI * 2);
-      g.fill();
-    }
-    return c;
-  }
-
-  function buildSprites() {
-    if (sprites) return; // built once; atlas never depends on canvas size
-    sprites = [];
-    for (const b of BASES) sprites.push(buildGlowSprite(b.rgb));
-    sprites.push(buildGlowSprite([226, 232, 240])); // backbone node tint (cool slate)
-
-    nodeSprites = [];
-    for (const tier of SPRITE_TIERS) {
-      nodeSprites.push(buildNodeSprite([226, 232, 240], tier));
-    }
-
-    letterSprites = {};
-    for (const b of BASES) letterSprites[b.letter] = buildLetterSprite(b.letter, b.rgb);
-
-    bondSprites = [[], [], [], []]; // indexed by hydrogen-bond count (2 and 3 used)
-    for (const tier of SPRITE_TIERS) {
-      bondSprites[2].push(buildBondSprite(2, tier));
-      bondSprites[3].push(buildBondSprite(3, tier));
+  function buildBackdrop() {
+    const bw = Math.max(2, Math.round(width)), bh = Math.max(2, Math.round(height));
+    backdrop = document.createElement('canvas');
+    backdrop.width = bw;
+    backdrop.height = bh;
+    const g = backdrop.getContext('2d');
+    const bg = g.createLinearGradient(0, 0, 0, bh);
+    bg.addColorStop(0, '#02030a');
+    bg.addColorStop(0.5, '#050a18');
+    bg.addColorStop(1, '#02040c');
+    g.fillStyle = bg;
+    g.fillRect(0, 0, bw, bh);
+    const neb = g.createRadialGradient(bw / 2, bh / 2, 0, bw / 2, bh / 2, Math.max(bw, bh) * 0.55);
+    neb.addColorStop(0, 'rgba(40,90,140,0.16)');
+    neb.addColorStop(0.5, 'rgba(70,40,110,0.08)');
+    neb.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = neb;
+    g.fillRect(0, 0, bw, bh);
+    const rnd = mulberry32(1337);
+    const count = isPreview ? 70 : 160;
+    for (let i = 0; i < count; i++) {
+      const x = rnd() * bw, y = rnd() * bh, s = rnd() * 1.4 + 0.3;
+      g.fillStyle = `rgba(200,215,255,${0.15 + rnd() * 0.5})`;
+      g.fillRect(x, y, s, s);
     }
   }
 
-  // ---- Sequence seeding ----------------------------------------------------
-  function seedSequence() {
-    const rand = mulberry32(0xDA7A3ED);
-    for (let i = 0; i < MAX_COUNT; i++) {
-      seqIdx[i] = (rand() * 4) | 0;
-      phase[i] = rand() * Math.PI * 2;
-    }
-  }
-  seedSequence();
-
-  // ---- Resize --------------------------------------------------------------
   function resize(w, h) {
     width = w;
     height = h;
-    buildSprites();
-    const needed = Math.ceil((height * 1.35) / STEP_SPACING) + 2;
-    count = Math.min(MAX_COUNT, Math.max(12, needed));
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(2, Math.round(w * dpr));
+    canvas.height = Math.max(2, Math.round(h * dpr));
+    buildBackdrop();
   }
 
-  // ---- Update (frame-rate independent, hover speeds up gently) -------------
   function update(dt, isHovered) {
     const motionScale = prefersReducedMotion ? 0.3 : 1.0;
-    const speedMult = (isHovered && !prefersReducedMotion ? 1.5 : 1.0) * motionScale;
-    time += Math.min(dt, 0.1) * speedMult;
+    const boost = (isHovered && !prefersReducedMotion) ? 1.5 : 1.0;
+    // Single source of truth: continuous seconds -> normalized loop phase.
+    // After every full period the scene lands back on the IDENTICAL starting
+    // frame — the same matching first/last behaviour as the Classic Globe's
+    // periodic rotation. All geometry below is strictly a function of phase.
+    totalT += dt * motionScale * boost;
+    phase = ((totalT / LOOP_SECONDS) % 1 + 1) % 1;
   }
 
-  // ---- Draw ------------------------------------------------------------------
+  // Periodicity proof (why first frame == last frame):
+  //   spin advances SPIN_TURNS * 2*PI        -> same orientation
+  //   scroll advances SCROLL_PITCHES * PITCH -> rung s sits exactly where
+  //     rung s - (SCROLL_PITCHES * RUNGS) sat, and BASES has period
+  //     SCROLL_PITCHES * RUNGS, so that rung carries the identical base pair
+  //   sway/breathe use SWAY_CYCLES/BREATHE_CYCLES whole oscillations
+  // Everything matches -> a pixel-perfect infinite loop, like the Globe.
+
   function draw(context, w, h) {
-    if (!sprites) buildSprites();
-
-    // Deep-space style backdrop with vertical gradient feel via two rects
-    context.globalCompositeOperation = 'source-over';
-    context.globalAlpha = 1;
-    context.fillStyle = '#01030a';
-    context.fillRect(0, 0, w, h);
-    context.fillStyle = 'rgba(14, 32, 64, 0.35)';
-    context.fillRect(0, h * 0.25, w, h * 0.5);
-
     const cx = w / 2;
     const cy = h / 2;
-    const helixRadius = Math.min(w, h) * (isPreview ? 0.26 : 0.22);
-    const worldScale = helixRadius / 90; // map world radii to screen
-    const scroll = (time * SCROLL_SPEED) % PITCH; // exact pitch -> seamless loop
-    const spin = time * (SCROLL_SPEED / PITCH) * Math.PI * 2; // rotates with scroll
+    // Helix height spans ~2 pitch periods and always fits inside the canvas
+    // (max 1.1x the smaller dimension), so no rung wraps mid-molecule and the
+    // whole helix visibly returns to its starting pose once per loop — the
+    // same matching first/last frame behaviour as the Classic Globe saver.
+    const periodPx = (h * 0.9) / WINDOW_PITCHES;           // screen px per helix turn
+    const scaleY = periodPx / PITCH;
+    const R = Math.min(w * 0.3, periodPx * 0.22);          // helix radius
+    // Everything below is a pure function of `phase`, and every animated term
+    // completes an INTEGER number of cycles per loop:
+    //   spin   : SPIN_TURNS full rotations           -> same orientation at wrap
+    //   scroll : SCROLL_PITCHES helix pitches        -> the molecule shifts by
+    //            exactly one visible turn (WINDOW_PITCHES), so slot s lands on
+    //            the start state of slot s + RUNGS — identical angle, depth
+    //            and base pair (BASES period == RUNGS divides SCROLL_PITCHES*RUNGS)
+    //   sway/breathe: SWAY_CYCLES / BREATHE_CYCLES whole oscillations
+    // Hence frame(phase=0) == frame(phase=1): a pixel-perfect infinite loop.
+    const u = phase * WINDOW_PITCHES * RUNGS;         // rungs travelled (integer at wrap)
+    const spin = phase * SPIN_TURNS * Math.PI * 2;    // integer turns at wrap
+    const tilt = 0.38;                                    // elegant lean
+    const cosLean = Math.cos(tilt), sinLean = Math.sin(tilt);
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (backdrop) context.drawImage(backdrop, 0, 0, w, h);
+    else { context.fillStyle = '#02030a'; context.fillRect(0, 0, w, h); }
 
-    // Rungs are laid out top->bottom; painter's algorithm sorts by depth.
-    // Two cheap passes avoid allocating objects per frame.
-    const stepTop = -(height * 0.18);
+    // central luminous column (single cheap blit)
+    const glowW = R * 7;
+    context.globalCompositeOperation = 'lighter';
+    context.drawImage(sprites.glowCyan, cx - glowW / 2, cy - glowW / 2, glowW, glowW);
+    context.globalCompositeOperation = 'source-over';
 
-    // Back pass (z < 0), then front pass (z >= 0): strands weave correctly.
+    // Conveyor layout: rung s sits at (s - u) * RUNG_SPACING below the helix
+    // centre. As phase runs 0->1, u runs 0..SCROLL_PITCHES and every rung
+    // smoothly descends one rung per 1/(RUNGS*SCROLL_PITCHES) of a loop; at
+    // wrap each rung occupies exactly the screen slot (and angle, and base
+    // pair) that its neighbour held at the start — nothing pops in or out,
+    // the molecule reads as infinitely long, like the Globe's endless spin.
+    const sway = Math.sin(phase * Math.PI * 2 * SWAY_CYCLES) * RUNG_SPACING * 0.55;
+    const breathe = 1 + 0.06 * Math.sin(phase * Math.PI * 2 * BREATHE_CYCLES);
+    for (let s = 0; s < SLOTS; s++) {
+      const off = (s - u) * RUNG_SPACING; // continuous downward conveyor
+      const ang = (s / RUNGS) * Math.PI * 2 + spin; // fixed per-slot phase -> perfect wrap
+      const wy = off * scaleY;
+      const depth = Math.sin(ang);
+      const halfW = R * breathe * Math.cos(ang);
+      nodeX[s * 2] = cx - halfW - wy * sinLean + sway;
+      nodeX[s * 2 + 1] = cx + halfW - wy * sinLean + sway;
+      nodeY[s * 2] = cy + wy * cosLean;
+      nodeY[s * 2 + 1] = nodeY[s * 2];
+      rungDepth[s] = depth;
+    }
+
+    // Painter's algorithm in two allocation-free passes (back, then front).
     for (let pass = 0; pass < 2; pass++) {
-      for (let i = 0; i < count; i++) {
-        const idx = pass === 0 ? (count - 1 - i) : i; // back-to-front ordering hint
-        const yWorld = stepTop + idx * STEP_SPACING - scroll;
-        const y = cy + yWorld;
-        if (y < -STEP_SPACING || y > h + STEP_SPACING) continue;
+      for (let s = 0; s < SLOTS; s++) {
+        const d = rungDepth[s];
+        const front = d >= 0;
+        if ((pass === 0 && front) || (pass === 1 && !front)) continue;
+        const ia = s * 2, ib = ia + 1;
+        const scale = 0.55 + 0.45 * ((d + 1) / 2);
+        const alpha = 0.35 + 0.65 * ((d + 1) / 2);
+        const tier = d > 0.45 ? 0 : d > -0.2 ? 1 : 2;
+        const ns = sprites.nodeA[tier].width * scale;
 
-        const angle = idx * TWIST_PER_STEP + spin;
-        const a2 = angle + Math.PI + CROSSLAP;
-        const z1 = Math.sin(angle);
-        const z2 = Math.sin(a2);
-        const avgZ = (z1 + z2) * 0.5;
+        // Each screen slot carries a fixed base pair (BASES period == SLOTS),
+        // so letters, angles and depth all return to their exact start state
+        // at the loop boundary — no flicker, no drift, ever.
+        const base = BASES[s % BASES.length];
+        const pair = PAIR[base];
+        const bonds = BONDS[base + pair] || 2;
+        const bs = sprites.bonds[bonds][tier];
+        const spanW = Math.abs(nodeX[ib] - nodeX[ia]);
+        const midX = (nodeX[ia] + nodeX[ib]) / 2;
 
-        const isBack = avgZ < 0;
-        if ((pass === 0) !== isBack) continue;
+        context.globalAlpha = alpha * 0.9;
+        if (spanW > 6) context.drawImage(bs, midX - spanW / 2, nodeY[ia] - 6 * scale, spanW, 12 * scale);
 
-        const x1 = cx + Math.cos(angle) * helixRadius;
-        const x2 = cx + Math.cos(a2) * helixRadius;
+        context.globalAlpha = alpha;
+        context.drawImage(sprites.nodeA[tier], nodeX[ia] - ns / 2, nodeY[ia] - ns / 2, ns, ns);
+        context.drawImage(sprites.nodeB[tier], nodeX[ib] - ns / 2, nodeY[ib] - ns / 2, ns, ns);
 
-        const depth = avgZ * 0.5 + 0.5;               // 0 (far) .. 1 (near)
-        const alpha = 0.28 + depth * 0.72;
-        const twinkle = 0.85 + 0.15 * Math.sin(time * 2.2 + phase[idx]);
-        const scale = 0.72 + depth * 0.5;
-
-        const leftBase = BASES[seqIdx[idx]];
-        const rightBase = BASES[COMPLEMENT[seqIdx[idx]]];
-        const bonds = (leftBase.letter === 'G' || leftBase.letter === 'C') ? 3 : 2;
-
-        // --- Base-pair rung (two half-rungs toward the minor-groove center) --
-        const midX = (x1 + x2) / 2;
-        const gap = 3.2 * scale;
-        context.globalAlpha = alpha * 0.9 * twinkle;
-        context.lineWidth = Math.max(1.4, 5.0 * scale * worldScale * 1.2);
-        context.lineCap = 'round';
-        context.strokeStyle = `rgb(${leftBase.rgb[0]}, ${leftBase.rgb[1]}, ${leftBase.rgb[2]})`;
-        context.beginPath();
-        context.moveTo(x1, y);
-        context.lineTo(midX - gap, y);
-        context.stroke();
-        context.strokeStyle = `rgb(${rightBase.rgb[0]}, ${rightBase.rgb[1]}, ${rightBase.rgb[2]})`;
-        context.beginPath();
-        context.moveTo(midX + gap, y);
-        context.lineTo(x2, y);
-        context.stroke();
-
-        // Hydrogen-bond dots at the axis (2 for A=T, 3 for G=C)
-        const bondTier = depth > 0.66 ? 2 : depth > 0.33 ? 1 : 0;
-        const bondSpr = bondSprites[bonds][bondTier];
-        context.globalAlpha = alpha * 0.85;
-        context.drawImage(bondSpr, midX - bondSpr.width / 2, y - bondSpr.height / 2);
-
-        // --- Sugar-phosphate nodes with per-base glow -------------------------
-        drawNode(context, x1, y, z1, leftBase, alpha * twinkle, scale, worldScale);
-        drawNode(context, x2, y, z2, rightBase, alpha * twinkle, scale, worldScale);
-
-        // --- Nucleotide letters (front-facing rungs only, keeps it clean) ----
-        if (depth > 0.55 && !isPreview) {
-          const ls = letterSprites[leftBase.letter];
-          const rs = letterSprites[rightBase.letter];
-          const lx = x1 + (midX - x1) * 0.55;
-          const rx = x2 + (midX - x2) * 0.55;
-          const lsize = 16 * scale;
-          context.globalAlpha = (depth - 0.55) / 0.45 * 0.9;
-          context.drawImage(ls, lx - lsize / 2, y - lsize / 2, lsize, lsize);
-          context.drawImage(rs, rx - lsize / 2, y - lsize / 2, lsize, lsize);
+        if (front && scale > 0.8 && spanW > 40) {
+          const ls = 20 * scale;
+          context.drawImage(sprites.letters[base], nodeX[ia] - ls / 2, nodeY[ia] - ls / 2, ls, ls);
+          context.drawImage(sprites.letters[pair], nodeX[ib] - ls / 2, nodeY[ib] - ls / 2, ls, ls);
         }
       }
     }
+    context.globalAlpha = 1;
 
+    // soft additive halo on strongly front-facing rungs (bio-fluorescence)
+    context.globalCompositeOperation = 'lighter';
+    for (let s = 0; s < SLOTS; s += 2) {
+      const d = rungDepth[s];
+      if (d <= 0.55) continue;
+      const ia = s * 2;
+      const g2 = 34 * d;
+      context.globalAlpha = 0.16 * d;
+      context.drawImage(sprites.glowRose, nodeX[ia] - g2 / 2, nodeY[ia] - g2 / 2, g2, g2);
+      context.drawImage(sprites.glowRose, nodeX[ia + 1] - g2 / 2, nodeY[ia + 1] - g2 / 2, g2, g2);
+    }
     context.globalAlpha = 1;
     context.globalCompositeOperation = 'source-over';
-
-    if (!isPreview) {
-      context.fillStyle = 'rgba(148, 197, 253, 0.65)';
-      context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
-      context.textAlign = 'left';
-      context.fillText('DNA DOUBLE HELIX: SEAMLESS B-FORM SCROLL [ANTIPARALLEL STRANDS | A=T 2 BONDS, G\u2261C 3 BONDS]', 28, h - 28);
-    }
-  }
-
-  function drawNode(context, x, y, z, base, alpha, scale, worldScale) {
-    const depth = z * 0.5 + 0.5;
-    const tier = depth > 0.66 ? 2 : depth > 0.33 ? 1 : 0;
-    const r = PHOSPHATE_R * scale * worldScale * (0.8 + depth * 0.35);
-
-    // Colored glow behind the node (additive for a luminous bio look)
-    context.globalCompositeOperation = 'lighter';
-    context.globalAlpha = alpha * 0.34 * (0.6 + depth * 0.4);
-    const glow = sprites[BASES.indexOf(base)];
-    const gs = r * GLOW_SCALE;
-    context.drawImage(glow, x - gs / 2, y - gs / 2, gs, gs);
-    context.globalCompositeOperation = 'source-over';
-
-    context.globalAlpha = alpha;
-    const spr = nodeSprites[tier];
-    context.drawImage(spr, x - r, y - r, r * 2, r * 2);
   }
 
   function destroy() {
-    sprites = null;
-    nodeSprites = null;
-    letterSprites = null;
-    bondSprites = null;
+    for (const k in sprites) delete sprites[k];
+    backdrop = null;
   }
 
   return { resize, update, draw, destroy };
