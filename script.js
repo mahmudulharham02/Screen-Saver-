@@ -99,7 +99,7 @@ const CATEGORIES = [
     id: 'biology',
     title: 'Biology',
     savers: [
-      { id: 'dna-double-helix', title: 'DNA Double Helix', create: createDNADoubleHelix },
+      { id: 'dna-double-helix', title: 'DNA Double Helix (Seamless)', create: createDNADoubleHelix },
       { id: 'mitosis', title: 'Mitosis', create: createMitosis }
     ]
   },
@@ -3101,119 +3101,308 @@ function createReactionDiffusion(canvas, isPreview) {
 }
 
 /**
- * 21. DNA DOUBLE HELIX
- * Three-dimensional animated DNA visualization with antiparallel strands,
- * major/minor grooves, and complementary A-T and G-C base pairs.
+ * 21. DNA DOUBLE HELIX (Milky Way style rebuild)
+ * A seamless, infinitely scrolling B-form DNA double helix rendered in the same
+ * low-RAM engine style as the Milky Way Galaxy saver: pre-rendered sprite
+ * atlases, flat typed-array state, depth-sorted painter's algorithm, and
+ * frame-rate-independent motion. The strand scroll distance is an exact
+ * multiple of the helix pitch, so the loop is perfectly seamless.
  */
 function createDNADoubleHelix(canvas, isPreview) {
   let width = 0;
   let height = 0;
   let time = 0;
 
-  const BASE_PAIRS = [
-    { left: 'A', right: 'T', colL: '#f59e0b', colR: '#87CEFA', bonds: 2 },
-    { left: 'G', right: 'C', colL: '#10b981', colR: '#818cf8', bonds: 3 },
-    { left: 'T', right: 'A', colL: '#87CEFA', colR: '#f59e0b', bonds: 2 },
-    { left: 'C', right: 'G', colL: '#818cf8', colR: '#10b981', bonds: 3 }
+  // ---- Helix geometry constants -------------------------------------------
+  const TWIST_PER_STEP = Math.PI / 5;      // 36 deg -> 10 steps per full turn
+  const STEP_SPACING = 34;                 // world units between base pairs
+  const PITCH = STEP_SPACING * (Math.PI * 2) / TWIST_PER_STEP; // 340 world units per full turn
+  const SCROLL_SPEED = 58;                 // world units/sec (one full turn every ~5.9s)
+  const CROSSLAP = 0.32;                   // antiparallel sugar offset (~18 deg)
+  const PHOSPHATE_R = 7.4;                 // backbone node radius (world units)
+  const GLOW_SCALE = 3.4;                  // glow sprite size relative to node
+
+  // ---- Nucleotide palette (A=T two H-bonds, G=C three H-bonds) ------------
+  const BASES = [
+    { letter: 'A', rgb: [251, 191, 36] },   // amber
+    { letter: 'T', rgb: [96, 165, 250] },   // sky blue
+    { letter: 'G', rgb: [52, 211, 153] },   // emerald
+    { letter: 'C', rgb: [165, 180, 252] }   // indigo
   ];
+  const COMPLEMENT = [1, 0, 3, 2];          // A-T, T-A, G-C, C-G
 
-  return {
-    resize(w, h) {
-      width = w;
-      height = h;
-    },
-    update(dt, isHovered) {
-      const motionScale = prefersReducedMotion ? 0.35 : 1.0;
-      const speedMult = (isHovered && !prefersReducedMotion ? 1.4 : 1.0) * motionScale;
-      time += Math.min(dt, 0.1) * speedMult;
-    },
-    draw(context, w, h) {
-      context.fillStyle = '#000000';
-      context.fillRect(0, 0, w, h);
+  // ---- Deterministic PRNG for the sequence (stable across resizes) --------
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
 
-      const cx = w / 2;
-      const cy = h / 2;
-      const helixRadius = Math.min(w, h) * (isPreview ? 0.28 : 0.24);
-      const totalSteps = isPreview ? 24 : 44;
-      const stepH = (h * 1.3) / totalSteps;
+  // ---- Engine state --------------------------------------------------------
+  let count = 0;                            // visible rung count (rebuilt on resize)
+  const MAX_COUNT = isPreview ? 26 : 48;    // tiny footprint: <2KB of Float32 state
+  const seqIdx = new Uint8Array(MAX_COUNT); // nucleotide index on strand 1
+  const phase = new Float32Array(MAX_COUNT);// stable per-step phase jitter (visual only)
 
-      const elements = [];
+  // Pre-rendered sprites (built once, reused every frame - no per-frame arcs)
+  let sprites = null;                       // soft round glows per base color
+  let nodeSprites = null;                   // sugar-phosphate backbone nodes (LOD tiers)
+  let letterSprites = null;                 // nucleotide letters baked onto rungs
+  let bondSprites = null;                   // hydrogen-bond dot strips (2 or 3 bonds)
+  const SPRITE_TIERS = [24, 40, 72];        // LOD sizes for phosphate nodes
 
-      for (let i = 0; i < totalSteps; i++) {
-        const y = (i * stepH - (time * 60) % stepH) - h * 0.15;
-        const angle = i * 0.38 + time * 1.2;
+  function makeCanvas(size) {
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    return c;
+  }
 
-        const bp = BASE_PAIRS[i % BASE_PAIRS.length];
+  function buildGlowSprite(rgb) {
+    const S = 72;
+    const c = makeCanvas(S);
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(S / 2, S / 2, 1, S / 2, S / 2, S / 2);
+    grad.addColorStop(0.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 1)`);
+    grad.addColorStop(0.35, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.55)`);
+    grad.addColorStop(1.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0)`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, S, S);
+    return c;
+  }
+
+  function buildNodeSprite(rgb, size) {
+    const c = makeCanvas(size);
+    const g = c.getContext('2d');
+    const r = size / 2;
+    // Soft halo
+    const grad = g.createRadialGradient(r, r, 1, r, r, r);
+    grad.addColorStop(0.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.9)`);
+    grad.addColorStop(0.5, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.25)`);
+    grad.addColorStop(1.0, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0)`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+    // Solid core with a cool sugar-phosphate tint and specular highlight
+    g.beginPath();
+    g.arc(r, r, r * 0.52, 0, Math.PI * 2);
+    g.fillStyle = `rgb(${Math.min(255, rgb[0] + 40)}, ${Math.min(255, rgb[1] + 40)}, ${Math.min(255, rgb[2] + 40)})`;
+    g.fill();
+    g.beginPath();
+    g.arc(r - r * 0.16, r - r * 0.18, r * 0.16, 0, Math.PI * 2);
+    g.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    g.fill();
+    return c;
+  }
+
+  function buildLetterSprite(letter, rgb) {
+    const S = 40;
+    const c = makeCanvas(S);
+    const g = c.getContext('2d');
+    g.font = 'bold 26px "SF Mono", Menlo, Consolas, monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.95)`;
+    g.fillText(letter, S / 2, S / 2 + 1);
+    return c;
+  }
+
+  function buildBondSprite(bonds, tierSize) {
+    const W = Math.max(8, Math.round(tierSize * 1.6));
+    const H = Math.max(6, tierSize);
+    const c = makeCanvas(0);
+    c.width = W; c.height = H;
+    const g = c.getContext('2d');
+    g.fillStyle = 'rgba(255, 255, 255, 0.95)';
+    const dotR = Math.max(0.8, tierSize * 0.055);
+    for (let b = 0; b < bonds; b++) {
+      const oy = H * (bonds === 1 ? 0.5 : 0.3 + (b * 0.4) / (bonds - 1));
+      g.beginPath();
+      g.arc(W / 2, oy, dotR, 0, Math.PI * 2);
+      g.fill();
+    }
+    return c;
+  }
+
+  function buildSprites() {
+    if (sprites) return; // built once; atlas never depends on canvas size
+    sprites = [];
+    for (const b of BASES) sprites.push(buildGlowSprite(b.rgb));
+    sprites.push(buildGlowSprite([226, 232, 240])); // backbone node tint (cool slate)
+
+    nodeSprites = [];
+    for (const tier of SPRITE_TIERS) {
+      nodeSprites.push(buildNodeSprite([226, 232, 240], tier));
+    }
+
+    letterSprites = {};
+    for (const b of BASES) letterSprites[b.letter] = buildLetterSprite(b.letter, b.rgb);
+
+    bondSprites = [[], [], [], []]; // indexed by hydrogen-bond count (2 and 3 used)
+    for (const tier of SPRITE_TIERS) {
+      bondSprites[2].push(buildBondSprite(2, tier));
+      bondSprites[3].push(buildBondSprite(3, tier));
+    }
+  }
+
+  // ---- Sequence seeding ----------------------------------------------------
+  function seedSequence() {
+    const rand = mulberry32(0xDA7A3ED);
+    for (let i = 0; i < MAX_COUNT; i++) {
+      seqIdx[i] = (rand() * 4) | 0;
+      phase[i] = rand() * Math.PI * 2;
+    }
+  }
+  seedSequence();
+
+  // ---- Resize --------------------------------------------------------------
+  function resize(w, h) {
+    width = w;
+    height = h;
+    buildSprites();
+    const needed = Math.ceil((height * 1.35) / STEP_SPACING) + 2;
+    count = Math.min(MAX_COUNT, Math.max(12, needed));
+  }
+
+  // ---- Update (frame-rate independent, hover speeds up gently) -------------
+  function update(dt, isHovered) {
+    const motionScale = prefersReducedMotion ? 0.3 : 1.0;
+    const speedMult = (isHovered && !prefersReducedMotion ? 1.5 : 1.0) * motionScale;
+    time += Math.min(dt, 0.1) * speedMult;
+  }
+
+  // ---- Draw ------------------------------------------------------------------
+  function draw(context, w, h) {
+    if (!sprites) buildSprites();
+
+    // Deep-space style backdrop with vertical gradient feel via two rects
+    context.globalCompositeOperation = 'source-over';
+    context.globalAlpha = 1;
+    context.fillStyle = '#01030a';
+    context.fillRect(0, 0, w, h);
+    context.fillStyle = 'rgba(14, 32, 64, 0.35)';
+    context.fillRect(0, h * 0.25, w, h * 0.5);
+
+    const cx = w / 2;
+    const cy = h / 2;
+    const helixRadius = Math.min(w, h) * (isPreview ? 0.26 : 0.22);
+    const worldScale = helixRadius / 90; // map world radii to screen
+    const scroll = (time * SCROLL_SPEED) % PITCH; // exact pitch -> seamless loop
+    const spin = time * (SCROLL_SPEED / PITCH) * Math.PI * 2; // rotates with scroll
+
+    // Rungs are laid out top->bottom; painter's algorithm sorts by depth.
+    // Two cheap passes avoid allocating objects per frame.
+    const stepTop = -(height * 0.18);
+
+    // Back pass (z < 0), then front pass (z >= 0): strands weave correctly.
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < count; i++) {
+        const idx = pass === 0 ? (count - 1 - i) : i; // back-to-front ordering hint
+        const yWorld = stepTop + idx * STEP_SPACING - scroll;
+        const y = cy + yWorld;
+        if (y < -STEP_SPACING || y > h + STEP_SPACING) continue;
+
+        const angle = idx * TWIST_PER_STEP + spin;
+        const a2 = angle + Math.PI + CROSSLAP;
+        const z1 = Math.sin(angle);
+        const z2 = Math.sin(a2);
+        const avgZ = (z1 + z2) * 0.5;
+
+        const isBack = avgZ < 0;
+        if ((pass === 0) !== isBack) continue;
 
         const x1 = cx + Math.cos(angle) * helixRadius;
-        const z1 = Math.sin(angle);
+        const x2 = cx + Math.cos(a2) * helixRadius;
 
-        const x2 = cx + Math.cos(angle + Math.PI + 0.3) * helixRadius;
-        const z2 = Math.sin(angle + Math.PI + 0.3);
+        const depth = avgZ * 0.5 + 0.5;               // 0 (far) .. 1 (near)
+        const alpha = 0.28 + depth * 0.72;
+        const twinkle = 0.85 + 0.15 * Math.sin(time * 2.2 + phase[idx]);
+        const scale = 0.72 + depth * 0.5;
 
-        elements.push({
-          y,
-          x1, z1,
-          x2, z2,
-          bp,
-          avgZ: (z1 + z2) / 2
-        });
-      }
+        const leftBase = BASES[seqIdx[idx]];
+        const rightBase = BASES[COMPLEMENT[seqIdx[idx]]];
+        const bonds = (leftBase.letter === 'G' || leftBase.letter === 'C') ? 3 : 2;
 
-      elements.sort((a, b) => a.avgZ - b.avgZ);
-
-      for (let el of elements) {
-        const alpha = Math.max(0.2, Math.min(1, 0.65 + el.avgZ * 0.35));
-        const midX = (el.x1 + el.x2) / 2;
-        context.lineWidth = isPreview ? 2.5 : 4.0;
-
-        context.strokeStyle = el.bp.colL;
-        context.globalAlpha = alpha;
+        // --- Base-pair rung (two half-rungs toward the minor-groove center) --
+        const midX = (x1 + x2) / 2;
+        const gap = 3.2 * scale;
+        context.globalAlpha = alpha * 0.9 * twinkle;
+        context.lineWidth = Math.max(1.4, 5.0 * scale * worldScale * 1.2);
+        context.lineCap = 'round';
+        context.strokeStyle = `rgb(${leftBase.rgb[0]}, ${leftBase.rgb[1]}, ${leftBase.rgb[2]})`;
         context.beginPath();
-        context.moveTo(el.x1, el.y);
-        context.lineTo(midX - 3, el.y);
+        context.moveTo(x1, y);
+        context.lineTo(midX - gap, y);
+        context.stroke();
+        context.strokeStyle = `rgb(${rightBase.rgb[0]}, ${rightBase.rgb[1]}, ${rightBase.rgb[2]})`;
+        context.beginPath();
+        context.moveTo(midX + gap, y);
+        context.lineTo(x2, y);
         context.stroke();
 
-        context.strokeStyle = el.bp.colR;
-        context.beginPath();
-        context.moveTo(midX + 3, el.y);
-        context.lineTo(el.x2, el.y);
-        context.stroke();
+        // Hydrogen-bond dots at the axis (2 for A=T, 3 for G=C)
+        const bondTier = depth > 0.66 ? 2 : depth > 0.33 ? 1 : 0;
+        const bondSpr = bondSprites[bonds][bondTier];
+        context.globalAlpha = alpha * 0.85;
+        context.drawImage(bondSpr, midX - bondSpr.width / 2, y - bondSpr.height / 2);
 
-        context.fillStyle = '#ffffff';
-        context.beginPath();
-        if (el.bp.bonds === 2) {
-          context.arc(midX - 1.5, el.y, 1.2, 0, Math.PI * 2);
-          context.arc(midX + 1.5, el.y, 1.2, 0, Math.PI * 2);
-        } else {
-          context.arc(midX - 2.5, el.y, 1.2, 0, Math.PI * 2);
-          context.arc(midX, el.y, 1.2, 0, Math.PI * 2);
-          context.arc(midX + 2.5, el.y, 1.2, 0, Math.PI * 2);
+        // --- Sugar-phosphate nodes with per-base glow -------------------------
+        drawNode(context, x1, y, z1, leftBase, alpha * twinkle, scale, worldScale);
+        drawNode(context, x2, y, z2, rightBase, alpha * twinkle, scale, worldScale);
+
+        // --- Nucleotide letters (front-facing rungs only, keeps it clean) ----
+        if (depth > 0.55 && !isPreview) {
+          const ls = letterSprites[leftBase.letter];
+          const rs = letterSprites[rightBase.letter];
+          const lx = x1 + (midX - x1) * 0.55;
+          const rx = x2 + (midX - x2) * 0.55;
+          const lsize = 16 * scale;
+          context.globalAlpha = (depth - 0.55) / 0.45 * 0.9;
+          context.drawImage(ls, lx - lsize / 2, y - lsize / 2, lsize, lsize);
+          context.drawImage(rs, rx - lsize / 2, y - lsize / 2, lsize, lsize);
         }
-        context.fill();
-
-        context.fillStyle = '#e2e8f0';
-        context.beginPath();
-        context.arc(el.x1, el.y, (isPreview ? 3.5 : 5.5) * (0.8 + el.z1 * 0.25), 0, Math.PI * 2);
-        context.fill();
-
-        context.fillStyle = '#94a3b8';
-        context.beginPath();
-        context.arc(el.x2, el.y, (isPreview ? 3.5 : 5.5) * (0.8 + el.z2 * 0.25), 0, Math.PI * 2);
-        context.fill();
       }
+    }
 
-      context.globalAlpha = 1.0;
+    context.globalAlpha = 1;
+    context.globalCompositeOperation = 'source-over';
 
-      if (!isPreview) {
-        context.fillStyle = 'rgba(135, 206, 250, 0.7)';
-        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
-        context.textAlign = 'left';
-        context.fillText('DNA DOUBLE HELIX: B-FORM [ANTIPARALLEL STRANDS | A=T (2 H-BONDS), G≡C (3 H-BONDS)]', 28, h - 28);
-      }
-    },
-    destroy() {}
-  };
+    if (!isPreview) {
+      context.fillStyle = 'rgba(148, 197, 253, 0.65)';
+      context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
+      context.textAlign = 'left';
+      context.fillText('DNA DOUBLE HELIX: SEAMLESS B-FORM SCROLL [ANTIPARALLEL STRANDS | A=T 2 BONDS, G\u2261C 3 BONDS]', 28, h - 28);
+    }
+  }
+
+  function drawNode(context, x, y, z, base, alpha, scale, worldScale) {
+    const depth = z * 0.5 + 0.5;
+    const tier = depth > 0.66 ? 2 : depth > 0.33 ? 1 : 0;
+    const r = PHOSPHATE_R * scale * worldScale * (0.8 + depth * 0.35);
+
+    // Colored glow behind the node (additive for a luminous bio look)
+    context.globalCompositeOperation = 'lighter';
+    context.globalAlpha = alpha * 0.34 * (0.6 + depth * 0.4);
+    const glow = sprites[BASES.indexOf(base)];
+    const gs = r * GLOW_SCALE;
+    context.drawImage(glow, x - gs / 2, y - gs / 2, gs, gs);
+    context.globalCompositeOperation = 'source-over';
+
+    context.globalAlpha = alpha;
+    const spr = nodeSprites[tier];
+    context.drawImage(spr, x - r, y - r, r * 2, r * 2);
+  }
+
+  function destroy() {
+    sprites = null;
+    nodeSprites = null;
+    letterSprites = null;
+    bondSprites = null;
+  }
+
+  return { resize, update, draw, destroy };
 }
 
 /**
