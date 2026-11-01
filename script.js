@@ -99,7 +99,7 @@ const CATEGORIES = [
     id: 'biology',
     title: 'Biology',
     savers: [
-      { id: 'dna-double-helix', title: 'DNA Double Helix', create: createDNADoubleHelix },
+      { id: 'dna-double-helix', title: 'DNA Double Helix (Infinite Loop)', create: createDNADoubleHelix },
       { id: 'mitosis', title: 'Mitosis', create: createMitosis }
     ]
   },
@@ -3101,119 +3101,293 @@ function createReactionDiffusion(canvas, isPreview) {
 }
 
 /**
- * 21. DNA DOUBLE HELIX
- * Three-dimensional animated DNA visualization with antiparallel strands,
- * major/minor grooves, and complementary A-T and G-C base pairs.
+ * 21. DNA DOUBLE HELIX (Infinite Loop rebuild)
+ * Completely rebuilt B-form DNA double helix with a mathematically perfect
+ * infinite loop, exactly like the Classic Globe saver: the Globe returns to
+ * its starting frame because its rotation is periodic; here BOTH the helix
+ * spin and the vertical scroll complete an integer number of cycles per loop
+ * period (SPIN_TURNS rotations x SCROLL_PITCHES pitches), so the first and
+ * last frames of every cycle are pixel-identical and it loops forever.
+ *
+ * Low-RAM engine (same style as Milky Way Galaxy): flat typed-array state,
+ * pre-rendered sprite atlases (zero gradients per animation frame), cached
+ * static backdrop rebuilt only on resize, no per-frame allocations or sorts,
+ * frame-rate-independent motion, and destroy() releases every cached canvas.
  */
 function createDNADoubleHelix(canvas, isPreview) {
   let width = 0;
   let height = 0;
-  let time = 0;
+  let dpr = 1;
 
-  const BASE_PAIRS = [
-    { left: 'A', right: 'T', colL: '#f59e0b', colR: '#87CEFA', bonds: 2 },
-    { left: 'G', right: 'C', colL: '#10b981', colR: '#818cf8', bonds: 3 },
-    { left: 'T', right: 'A', colL: '#87CEFA', colR: '#f59e0b', bonds: 2 },
-    { left: 'C', right: 'G', colL: '#818cf8', colR: '#10b981', bonds: 3 }
-  ];
+  // ---- Infinite-loop clock ---------------------------------------------------
+  const LOOP_SECONDS = isPreview ? 26 : 58;
+  const SPIN_TURNS = 4;        // full rotations per loop (integer -> seamless)
+  const SCROLL_PITCHES = 3;    // helix pitches scrolled per loop (integer -> seamless)
+  const SWAY_CYCLES = 2;       // axis sway oscillations per loop (integer -> seamless)
+  const BREATHE_CYCLES = 3;    // radial breathing cycles per loop (integer -> seamless)
+  let phase = 0;               // normalized loop time in [0,1)
+  let totalT = 0;              // continuous seconds since start
 
-  return {
-    resize(w, h) {
-      width = w;
-      height = h;
-    },
-    update(dt, isHovered) {
-      const motionScale = prefersReducedMotion ? 0.35 : 1.0;
-      const speedMult = (isHovered && !prefersReducedMotion ? 1.4 : 1.0) * motionScale;
-      time += Math.min(dt, 0.1) * speedMult;
-    },
-    draw(context, w, h) {
-      context.fillStyle = '#000000';
-      context.fillRect(0, 0, w, h);
+  // ---- Helix geometry (world units) --------------------------------------------
+  const PITCH = 340;                    // rise per full turn
+  const RUNGS = 20;                     // base pairs per pitch period
+  const RUNG_SPACING = PITCH / RUNGS;   // 17 units between consecutive rungs
+  const WINDOW_PITCHES = 2;             // helix turns visible in the viewport height
+  const SLOTS = RUNGS * WINDOW_PITCHES; // rungs on screen (one extra turn for smooth entry/exit)
+  // Slot s displays sequence index s % RUNGS, so its base letter always matches
+  // its phase position -> the whole molecule (geometry AND letters) is periodic.
+  const BASES = 'ATCGATCGTAGCTAGCATGC'; // period 20 == RUNGS; SLOTS (40) is a multiple, so slot-shifted recycling always matches
+  const PAIR = { A: 'T', T: 'A', G: 'C', C: 'G' };
+  const BONDS = { AT: 2, TA: 2, GC: 3, CG: 3 };
 
-      const cx = w / 2;
-      const cy = h / 2;
-      const helixRadius = Math.min(w, h) * (isPreview ? 0.28 : 0.24);
-      const totalSteps = isPreview ? 24 : 44;
-      const stepH = (h * 1.3) / totalSteps;
+  // ---- Flat typed-array state (no heap objects in the hot path) ----------------
+  const nodeX = new Float32Array(SLOTS * 2);
+  const nodeY = new Float32Array(SLOTS * 2);
+  const rungDepth = new Float32Array(SLOTS);
 
-      const elements = [];
+  // ---- Sprite atlases ------------------------------------------------------------
+  const sprites = {};
+  function makeCanvas(w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(2, Math.ceil(w));
+    c.height = Math.max(2, Math.ceil(h || w));
+    return c;
+  }
+  function buildGlow(rgb) {
+    const S = 96, c = makeCanvas(S), g = c.getContext('2d');
+    const grad = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    grad.addColorStop(0, `rgba(${rgb},0.5)`);
+    grad.addColorStop(0.45, `rgba(${rgb},0.16)`);
+    grad.addColorStop(1, `rgba(${rgb},0)`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, S, S);
+    return c;
+  }
+  function buildNode(rgb, size, bright) {
+    const c = makeCanvas(size), g = c.getContext('2d'), h = size / 2;
+    const grad = g.createRadialGradient(h, h, 0, h, h, h);
+    grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+    grad.addColorStop(0.35, `rgba(${rgb},${bright})`);
+    grad.addColorStop(1, `rgba(${rgb},0)`);
+    g.fillStyle = grad;
+    g.beginPath();
+    g.arc(h, h, h, 0, Math.PI * 2);
+    g.fill();
+    return c;
+  }
+  function buildLetter(letter, rgb) {
+    const S = 34, c = makeCanvas(S), g = c.getContext('2d');
+    g.font = 'bold 17px "Segoe UI", system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.shadowColor = `rgba(${rgb},0.9)`;
+    g.shadowBlur = 6;
+    g.fillStyle = 'rgba(235,245,255,0.95)';
+    g.fillText(letter, S / 2, S / 2 + 1);
+    return c;
+  }
+  function buildBondStrip(bonds, tierSize) {
+    const W = 64, H = 12, c = makeCanvas(W, H), g = c.getContext('2d');
+    const r = Math.max(1.4, tierSize * 0.09);
+    for (let b = 0; b < bonds; b++) {
+      const x = W * (bonds === 1 ? 0.5 : 0.28 + 0.44 * (b / (bonds - 1)));
+      g.fillStyle = 'rgba(210,230,255,0.92)';
+      g.beginPath();
+      g.arc(x, H / 2, r, 0, Math.PI * 2);
+      g.fill();
+    }
+    return c;
+  }
+  function buildSprites() {
+    sprites.glowCyan = buildGlow('90,200,255');
+    sprites.glowRose = buildGlow('255,120,190');
+    sprites.nodeA = [buildNode('120,210,255', 26, 0.9), buildNode('120,210,255', 14, 0.75), buildNode('120,210,255', 9, 0.6)];
+    sprites.nodeB = [buildNode('255,140,200', 26, 0.9), buildNode('255,140,200', 14, 0.75), buildNode('255,140,200', 9, 0.6)];
+    sprites.letters = {};
+    for (const L of ['A', 'T', 'G', 'C']) sprites.letters[L] = buildLetter(L, '140,220,255');
+    sprites.bonds = {};
+    for (const n of [2, 3]) sprites.bonds[n] = [buildBondStrip(n, 26), buildBondStrip(n, 14), buildBondStrip(n, 9)];
+  }
+  buildSprites();
 
-      for (let i = 0; i < totalSteps; i++) {
-        const y = (i * stepH - (time * 60) % stepH) - h * 0.15;
-        const angle = i * 0.38 + time * 1.2;
+  // ---- Cached static backdrop (rebuilt only on resize) ---------------------------
+  let backdrop = null;
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function buildBackdrop() {
+    const bw = Math.max(2, Math.round(width)), bh = Math.max(2, Math.round(height));
+    backdrop = document.createElement('canvas');
+    backdrop.width = bw;
+    backdrop.height = bh;
+    const g = backdrop.getContext('2d');
+    const bg = g.createLinearGradient(0, 0, 0, bh);
+    bg.addColorStop(0, '#02030a');
+    bg.addColorStop(0.5, '#050a18');
+    bg.addColorStop(1, '#02040c');
+    g.fillStyle = bg;
+    g.fillRect(0, 0, bw, bh);
+    const neb = g.createRadialGradient(bw / 2, bh / 2, 0, bw / 2, bh / 2, Math.max(bw, bh) * 0.55);
+    neb.addColorStop(0, 'rgba(40,90,140,0.16)');
+    neb.addColorStop(0.5, 'rgba(70,40,110,0.08)');
+    neb.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = neb;
+    g.fillRect(0, 0, bw, bh);
+    const rnd = mulberry32(1337);
+    const count = isPreview ? 70 : 160;
+    for (let i = 0; i < count; i++) {
+      const x = rnd() * bw, y = rnd() * bh, s = rnd() * 1.4 + 0.3;
+      g.fillStyle = `rgba(200,215,255,${0.15 + rnd() * 0.5})`;
+      g.fillRect(x, y, s, s);
+    }
+  }
 
-        const bp = BASE_PAIRS[i % BASE_PAIRS.length];
+  function resize(w, h) {
+    width = w;
+    height = h;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(2, Math.round(w * dpr));
+    canvas.height = Math.max(2, Math.round(h * dpr));
+    buildBackdrop();
+  }
 
-        const x1 = cx + Math.cos(angle) * helixRadius;
-        const z1 = Math.sin(angle);
+  function update(dt, isHovered) {
+    const motionScale = prefersReducedMotion ? 0.3 : 1.0;
+    const boost = (isHovered && !prefersReducedMotion) ? 1.5 : 1.0;
+    // Single source of truth: continuous seconds -> normalized loop phase.
+    // After every full period the scene lands back on the IDENTICAL starting
+    // frame — the same matching first/last behaviour as the Classic Globe's
+    // periodic rotation. All geometry below is strictly a function of phase.
+    totalT += dt * motionScale * boost;
+    phase = ((totalT / LOOP_SECONDS) % 1 + 1) % 1;
+  }
 
-        const x2 = cx + Math.cos(angle + Math.PI + 0.3) * helixRadius;
-        const z2 = Math.sin(angle + Math.PI + 0.3);
+  // Periodicity proof (why first frame == last frame):
+  //   spin advances SPIN_TURNS * 2*PI        -> same orientation
+  //   scroll advances SCROLL_PITCHES * PITCH -> rung s sits exactly where
+  //     rung s - (SCROLL_PITCHES * RUNGS) sat, and BASES has period
+  //     SCROLL_PITCHES * RUNGS, so that rung carries the identical base pair
+  //   sway/breathe use SWAY_CYCLES/BREATHE_CYCLES whole oscillations
+  // Everything matches -> a pixel-perfect infinite loop, like the Globe.
 
-        elements.push({
-          y,
-          x1, z1,
-          x2, z2,
-          bp,
-          avgZ: (z1 + z2) / 2
-        });
-      }
+  function draw(context, w, h) {
+    const cx = w / 2;
+    const cy = h / 2;
+    // Helix height spans ~2 pitch periods and always fits inside the canvas
+    // (max 1.1x the smaller dimension), so no rung wraps mid-molecule and the
+    // whole helix visibly returns to its starting pose once per loop — the
+    // same matching first/last frame behaviour as the Classic Globe saver.
+    const periodPx = (h * 0.9) / WINDOW_PITCHES;           // screen px per helix turn
+    const scaleY = periodPx / PITCH;
+    const R = Math.min(w * 0.3, periodPx * 0.22);          // helix radius
+    // Everything below is a pure function of `phase`, and every animated term
+    // completes an INTEGER number of cycles per loop:
+    //   spin   : SPIN_TURNS full rotations           -> same orientation at wrap
+    //   scroll : SCROLL_PITCHES helix pitches        -> the molecule shifts by
+    //            exactly one visible turn (WINDOW_PITCHES), so slot s lands on
+    //            the start state of slot s + RUNGS — identical angle, depth
+    //            and base pair (BASES period == RUNGS divides SCROLL_PITCHES*RUNGS)
+    //   sway/breathe: SWAY_CYCLES / BREATHE_CYCLES whole oscillations
+    // Hence frame(phase=0) == frame(phase=1): a pixel-perfect infinite loop.
+    const u = phase * WINDOW_PITCHES * RUNGS;         // rungs travelled (integer at wrap)
+    const spin = phase * SPIN_TURNS * Math.PI * 2;    // integer turns at wrap
+    const tilt = 0.38;                                    // elegant lean
+    const cosLean = Math.cos(tilt), sinLean = Math.sin(tilt);
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (backdrop) context.drawImage(backdrop, 0, 0, w, h);
+    else { context.fillStyle = '#02030a'; context.fillRect(0, 0, w, h); }
 
-      elements.sort((a, b) => a.avgZ - b.avgZ);
+    // central luminous column (single cheap blit)
+    const glowW = R * 7;
+    context.globalCompositeOperation = 'lighter';
+    context.drawImage(sprites.glowCyan, cx - glowW / 2, cy - glowW / 2, glowW, glowW);
+    context.globalCompositeOperation = 'source-over';
 
-      for (let el of elements) {
-        const alpha = Math.max(0.2, Math.min(1, 0.65 + el.avgZ * 0.35));
-        const midX = (el.x1 + el.x2) / 2;
-        context.lineWidth = isPreview ? 2.5 : 4.0;
+    // Conveyor layout: rung s sits at (s - u) * RUNG_SPACING below the helix
+    // centre. As phase runs 0->1, u runs 0..SCROLL_PITCHES and every rung
+    // smoothly descends one rung per 1/(RUNGS*SCROLL_PITCHES) of a loop; at
+    // wrap each rung occupies exactly the screen slot (and angle, and base
+    // pair) that its neighbour held at the start — nothing pops in or out,
+    // the molecule reads as infinitely long, like the Globe's endless spin.
+    const sway = Math.sin(phase * Math.PI * 2 * SWAY_CYCLES) * RUNG_SPACING * 0.55;
+    const breathe = 1 + 0.06 * Math.sin(phase * Math.PI * 2 * BREATHE_CYCLES);
+    for (let s = 0; s < SLOTS; s++) {
+      const off = (s - u) * RUNG_SPACING; // continuous downward conveyor
+      const ang = (s / RUNGS) * Math.PI * 2 + spin; // fixed per-slot phase -> perfect wrap
+      const wy = off * scaleY;
+      const depth = Math.sin(ang);
+      const halfW = R * breathe * Math.cos(ang);
+      nodeX[s * 2] = cx - halfW - wy * sinLean + sway;
+      nodeX[s * 2 + 1] = cx + halfW - wy * sinLean + sway;
+      nodeY[s * 2] = cy + wy * cosLean;
+      nodeY[s * 2 + 1] = nodeY[s * 2];
+      rungDepth[s] = depth;
+    }
 
-        context.strokeStyle = el.bp.colL;
+    // Painter's algorithm in two allocation-free passes (back, then front).
+    for (let pass = 0; pass < 2; pass++) {
+      for (let s = 0; s < SLOTS; s++) {
+        const d = rungDepth[s];
+        const front = d >= 0;
+        if ((pass === 0 && front) || (pass === 1 && !front)) continue;
+        const ia = s * 2, ib = ia + 1;
+        const scale = 0.55 + 0.45 * ((d + 1) / 2);
+        const alpha = 0.35 + 0.65 * ((d + 1) / 2);
+        const tier = d > 0.45 ? 0 : d > -0.2 ? 1 : 2;
+        const ns = sprites.nodeA[tier].width * scale;
+
+        // Each screen slot carries a fixed base pair (BASES period == SLOTS),
+        // so letters, angles and depth all return to their exact start state
+        // at the loop boundary — no flicker, no drift, ever.
+        const base = BASES[s % BASES.length];
+        const pair = PAIR[base];
+        const bonds = BONDS[base + pair] || 2;
+        const bs = sprites.bonds[bonds][tier];
+        const spanW = Math.abs(nodeX[ib] - nodeX[ia]);
+        const midX = (nodeX[ia] + nodeX[ib]) / 2;
+
+        context.globalAlpha = alpha * 0.9;
+        if (spanW > 6) context.drawImage(bs, midX - spanW / 2, nodeY[ia] - 6 * scale, spanW, 12 * scale);
+
         context.globalAlpha = alpha;
-        context.beginPath();
-        context.moveTo(el.x1, el.y);
-        context.lineTo(midX - 3, el.y);
-        context.stroke();
+        context.drawImage(sprites.nodeA[tier], nodeX[ia] - ns / 2, nodeY[ia] - ns / 2, ns, ns);
+        context.drawImage(sprites.nodeB[tier], nodeX[ib] - ns / 2, nodeY[ib] - ns / 2, ns, ns);
 
-        context.strokeStyle = el.bp.colR;
-        context.beginPath();
-        context.moveTo(midX + 3, el.y);
-        context.lineTo(el.x2, el.y);
-        context.stroke();
-
-        context.fillStyle = '#ffffff';
-        context.beginPath();
-        if (el.bp.bonds === 2) {
-          context.arc(midX - 1.5, el.y, 1.2, 0, Math.PI * 2);
-          context.arc(midX + 1.5, el.y, 1.2, 0, Math.PI * 2);
-        } else {
-          context.arc(midX - 2.5, el.y, 1.2, 0, Math.PI * 2);
-          context.arc(midX, el.y, 1.2, 0, Math.PI * 2);
-          context.arc(midX + 2.5, el.y, 1.2, 0, Math.PI * 2);
+        if (front && scale > 0.8 && spanW > 40) {
+          const ls = 20 * scale;
+          context.drawImage(sprites.letters[base], nodeX[ia] - ls / 2, nodeY[ia] - ls / 2, ls, ls);
+          context.drawImage(sprites.letters[pair], nodeX[ib] - ls / 2, nodeY[ib] - ls / 2, ls, ls);
         }
-        context.fill();
-
-        context.fillStyle = '#e2e8f0';
-        context.beginPath();
-        context.arc(el.x1, el.y, (isPreview ? 3.5 : 5.5) * (0.8 + el.z1 * 0.25), 0, Math.PI * 2);
-        context.fill();
-
-        context.fillStyle = '#94a3b8';
-        context.beginPath();
-        context.arc(el.x2, el.y, (isPreview ? 3.5 : 5.5) * (0.8 + el.z2 * 0.25), 0, Math.PI * 2);
-        context.fill();
       }
+    }
+    context.globalAlpha = 1;
 
-      context.globalAlpha = 1.0;
+    // soft additive halo on strongly front-facing rungs (bio-fluorescence)
+    context.globalCompositeOperation = 'lighter';
+    for (let s = 0; s < SLOTS; s += 2) {
+      const d = rungDepth[s];
+      if (d <= 0.55) continue;
+      const ia = s * 2;
+      const g2 = 34 * d;
+      context.globalAlpha = 0.16 * d;
+      context.drawImage(sprites.glowRose, nodeX[ia] - g2 / 2, nodeY[ia] - g2 / 2, g2, g2);
+      context.drawImage(sprites.glowRose, nodeX[ia + 1] - g2 / 2, nodeY[ia + 1] - g2 / 2, g2, g2);
+    }
+    context.globalAlpha = 1;
+    context.globalCompositeOperation = 'source-over';
+  }
 
-      if (!isPreview) {
-        context.fillStyle = 'rgba(135, 206, 250, 0.7)';
-        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
-        context.textAlign = 'left';
-        context.fillText('DNA DOUBLE HELIX: B-FORM [ANTIPARALLEL STRANDS | A=T (2 H-BONDS), G≡C (3 H-BONDS)]', 28, h - 28);
-      }
-    },
-    destroy() {}
-  };
+  function destroy() {
+    for (const k in sprites) delete sprites[k];
+    backdrop = null;
+  }
+
+  return { resize, update, draw, destroy };
 }
 
 /**
