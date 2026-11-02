@@ -112,7 +112,11 @@ const CATEGORIES = [
       { id: 'binary', title: 'Binary', create: createBinary },
       { id: 'milky-way-galaxy', title: 'Milky Way Galaxy', create: createMilkyWayGalaxy },
       { id: 'hexa', title: 'Hexa', create: createHexa },
-      { id: 'terminal', title: 'Terminal', create: createTerminal }
+      { id: 'terminal', title: 'Terminal', create: createTerminal },
+      { id: 'black-hole', title: 'Black Hole', create: createBlackHole },
+      { id: 'cpu', title: 'CPU', create: createCpu },
+      { id: 'motherboard', title: 'Motherboard', create: createMotherboard },
+      { id: 'real-time-clock', title: 'Real Time Clock', create: createRealTimeClock }
     ]
   }
 ];
@@ -6247,7 +6251,11 @@ function createRandomizerPreview(canvas, isPreview) {
   const terminal = createTerminal(canvas, true);
   const dna = createDNADoubleHelix(canvas, true);
   const math = createMathematicalCurves(canvas, true);
-  const samplers = [toasters, spiderMan, interstellar, ocean, fusion, tech, computer, milkyWay, terminal, dna, math];
+  const blackHole = createBlackHole(canvas, true);
+  const cpu = createCpu(canvas, true);
+  const motherboard = createMotherboard(canvas, true);
+  const clock = createRealTimeClock(canvas, true);
+  const samplers = [toasters, spiderMan, interstellar, ocean, fusion, tech, computer, milkyWay, terminal, dna, math, blackHole, cpu, motherboard, clock];
 
   return {
     resize(w, h, dpr) {
@@ -6281,6 +6289,1481 @@ function createRandomizerPreview(canvas, isPreview) {
       for (let s of samplers) {
         s.destroy();
       }
+    }
+  };
+}
+
+/**
+ * 34. BLACK HOLE (TECHNOLOGY)
+ * Gargantua-style accretion disk around a Schwarzschild black hole: pure-black
+ * event horizon with photon-ring rim, tilted incandescent disk with Doppler
+ * brightening on the approaching limb, gravitational lensing arcs that wrap
+ * light from behind the hole over and under the horizon, infalling matter
+ * spirals and a twinkling deep-space backdrop. Low-RAM engine: flat typed
+ * arrays, pre-rendered sprites, cached static backdrop, zero per-frame allocations.
+ */
+function createBlackHole(canvas, isPreview) {
+  let width = 0;
+  let height = 0;
+  let time = 0;
+  let spritesDirty = true;
+  let bgDirty = true;
+
+  const PARTICLE_COUNT = isPreview ? 900 : 2600;
+  const BG_STAR_COUNT = isPreview ? 110 : 380;
+
+  // Flat SoA particle state (infalling matter + sparks).
+  const pR = new Float32Array(PARTICLE_COUNT);      // radius in rs units (event horizon = 1)
+  const pTheta = new Float32Array(PARTICLE_COUNT);  // polar angle
+  const pSize = new Float32Array(PARTICLE_COUNT);
+  const pBright = new Float32Array(PARTICLE_COUNT);
+  const pPhase = new Float32Array(PARTICLE_COUNT);
+  const pKind = new Uint8Array(PARTICLE_COUNT);     // 0: hot white, 1: blue spark, 2: ember
+
+  const bgX = new Float32Array(BG_STAR_COUNT);
+  const bgY = new Float32Array(BG_STAR_COUNT);
+  const bgSize = new Float32Array(BG_STAR_COUNT);
+  const bgPhase = new Float32Array(BG_STAR_COUNT);
+  const bgRate = new Float32Array(BG_STAR_COUNT);
+
+  // Geometry constants (all expressed in units of the Schwarzschild radius rs).
+  const TILT = 0.30;                 // viewing tilt of the disk plane (radians)
+  const sinT = Math.sin(TILT);
+  const R_IN = 1.45;                 // inner disk edge (ISCO-ish visual)
+  const R_OUT = 4.6;                 // outer disk edge
+  const LENS_R = 1.0;                // photon-sphere scale for lens arcs
+  const SWIRL = 0.55;                // base angular swirl at R_IN (rad/s), Keplerian falloff
+  const INFALL = 0.10;               // base radial drift (rs/s)
+
+  let spriteCanvases = null;   // particle point sprites
+  let ringSprite = null;       // soft glow ring for the photon sphere
+  let coreSprite = null;       // warm haze just outside the horizon
+  let arcSprite = null;        // streak sprite used for lensed light arcs
+  let bgCanvas = null;
+  let bgCtx = null;
+
+  function makeSprite(size, stops) {
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(size / 2, size / 2, 0.4, size / 2, size / 2, size / 2);
+    for (const [pos, color] of stops) grad.addColorStop(pos, color);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+    return c;
+  }
+
+  function buildSprites() {
+    spriteCanvases = {
+      hot: makeSprite(20, [
+        [0, 'rgba(255, 252, 240, 1)'],
+        [0.35, 'rgba(255, 226, 170, 0.75)'],
+        [0.7, 'rgba(255, 170, 90, 0.25)'],
+        [1, 'rgba(255, 140, 60, 0)']
+      ]),
+      spark: makeSprite(20, [
+        [0, 'rgba(235, 246, 255, 1)'],
+        [0.35, 'rgba(160, 205, 255, 0.7)'],
+        [0.7, 'rgba(110, 160, 255, 0.22)'],
+        [1, 'rgba(80, 130, 255, 0)']
+      ]),
+      ember: makeSprite(20, [
+        [0, 'rgba(255, 214, 160, 0.95)'],
+        [0.4, 'rgba(255, 160, 90, 0.5)'],
+        [1, 'rgba(220, 110, 50, 0)']
+      ])
+    };
+    ringSprite = makeSprite(isPreview ? 128 : 256, [
+      [0, 'rgba(255, 255, 255, 0)'],
+      [0.62, 'rgba(255, 255, 255, 0)'],
+      [0.74, 'rgba(255, 236, 200, 0.55)'],
+      [0.8, 'rgba(255, 214, 150, 0.35)'],
+      [0.9, 'rgba(200, 170, 130, 0.08)'],
+      [1, 'rgba(160, 140, 110, 0)']
+    ]);
+    coreSprite = makeSprite(isPreview ? 128 : 256, [
+      [0, 'rgba(255, 220, 160, 0.28)'],
+      [0.45, 'rgba(255, 180, 110, 0.10)'],
+      [1, 'rgba(200, 120, 60, 0)']
+    ]);
+    arcSprite = makeSprite(32, [
+      [0, 'rgba(255, 244, 224, 0.85)'],
+      [0.3, 'rgba(255, 214, 160, 0.4)'],
+      [0.65, 'rgba(255, 170, 100, 0.12)'],
+      [1, 'rgba(230, 140, 70, 0)']
+    ]);
+    spritesDirty = false;
+  }
+
+  function placeParticle(i, reseed) {
+    const roll = Math.random();
+    pKind[i] = roll < 0.62 ? 0 : (roll < 0.85 ? 1 : 2);
+    pR[i] = reseed ? R_OUT - Math.random() * 0.9 : R_IN + Math.pow(Math.random(), 0.7) * (R_OUT - R_IN);
+    pTheta[i] = Math.random() * Math.PI * 2;
+    pSize[i] = 0.7 + Math.random() * 1.9;
+    pBright[i] = 0.35 + Math.random() * 0.65;
+    pPhase[i] = Math.random() * Math.PI * 2;
+  }
+
+  function initParticles() {
+    for (let i = 0; i < PARTICLE_COUNT; i++) placeParticle(i, false);
+  }
+
+  function initBgStars() {
+    for (let i = 0; i < BG_STAR_COUNT; i++) {
+      bgX[i] = Math.random();
+      bgY[i] = Math.random();
+      bgSize[i] = 0.5 + Math.random() * 1.3;
+      bgPhase[i] = Math.random() * Math.PI * 2;
+      bgRate[i] = 0.15 + Math.random() * 0.5;
+    }
+  }
+
+  /** Cached static backdrop: deep-space vignette + faint nebular haze near the hole. */
+  function buildBackground(w, h) {
+    if (!bgCanvas) {
+      bgCanvas = document.createElement('canvas');
+      bgCtx = bgCanvas.getContext('2d');
+    }
+    bgCanvas.width = Math.max(1, Math.round(w));
+    bgCanvas.height = Math.max(1, Math.round(h));
+
+    const g = bgCtx;
+    g.clearRect(0, 0, w, h);
+
+    const space = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.08, w / 2, h / 2, Math.max(w, h) * 0.75);
+    space.addColorStop(0, '#05040a');
+    space.addColorStop(0.55, '#020208');
+    space.addColorStop(1, '#000002');
+    g.fillStyle = space;
+    g.fillRect(0, 0, w, h);
+
+    // Faint warm nebula smear along the disk plane.
+    const len = Math.hypot(w, h);
+    g.save();
+    g.translate(w / 2, h / 2);
+    g.rotate(-TILT);
+    g.scale(1, 0.12);
+    const haze = g.createRadialGradient(0, 0, 10, 0, 0, len * 0.42);
+    haze.addColorStop(0, 'rgba(255, 190, 130, 0.07)');
+    haze.addColorStop(0.5, 'rgba(210, 150, 110, 0.03)');
+    haze.addColorStop(1, 'rgba(150, 110, 90, 0)');
+    g.fillStyle = haze;
+    g.beginPath();
+    g.arc(0, 0, len * 0.42, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+
+    bgDirty = false;
+  }
+
+  return {
+    resize(w, h) {
+      width = w;
+      height = h;
+      bgDirty = true;
+      if (spritesDirty || !spriteCanvases) buildSprites();
+      initParticles();
+      initBgStars();
+    },
+
+    update(dt, isHovered) {
+      const motionScale = prefersReducedMotion ? 0.3 : 1.0;
+      const speedMult = (isHovered && !prefersReducedMotion ? 1.6 : 1.0) * motionScale;
+      const stepDt = Math.min(dt, 0.05) * speedMult;
+      time += stepDt;
+
+      // Keplerian-ish swirl (inner matter orbits faster) with slow relativistic infall.
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const r = pR[i];
+        const omega = SWIRL * Math.pow(R_IN / r, 1.5);
+        pTheta[i] += omega * stepDt;
+        pR[i] = r - INFALL * stepDt * (1.2 / (0.4 + r));
+        if (pR[i] <= R_IN + 0.05) placeParticle(i, true);
+      }
+    },
+
+    draw(context, w, h) {
+      if (spritesDirty || !spriteCanvases) buildSprites();
+      if (bgDirty || !bgCanvas) buildBackground(w, h);
+
+      context.globalCompositeOperation = 'source-over';
+      context.globalAlpha = 1;
+      context.drawImage(bgCanvas, 0, 0, w, h);
+
+      const cx = w / 2;
+      const cy = h / 2;
+      const rs = Math.min(w * 0.5, h * 0.5) / (R_OUT * 1.18); // pixel scale of one Schwarzschild radius
+      const spin = time * 0.05 * (prefersReducedMotion ? 0.4 : 1.0);
+
+      // --- Distant twinkling starfield ---
+      context.fillStyle = '#cfe0ff';
+      for (let i = 0; i < BG_STAR_COUNT; i++) {
+        const tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(time * bgRate[i] * 2 + bgPhase[i]));
+        context.globalAlpha = tw * 0.75;
+        context.fillRect(bgX[i] * w, bgY[i] * h, bgSize[i], bgSize[i]);
+      }
+      context.globalAlpha = 1;
+
+      // --- Far half of the accretion disk (drawn before the horizon occludes it) ---
+      const drawDiskHalf = (farSide) => {
+        context.globalCompositeOperation = 'lighter';
+        const keys = ['hot', 'spark', 'ember'];
+        const sizeBoost = isPreview ? 0.8 : 1.0;
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+          const th = pTheta[i] + spin;
+          const s = Math.sin(th);
+          if (farSide ? s > 0 : s <= 0) continue;
+          const r = pR[i] * rs;
+          const px = cx + Math.cos(th) * r;
+          const py = cy + s * r * sinT;
+          // Doppler beaming: matter moving toward the viewer burns brighter/bluer.
+          const doppler = 0.55 + 0.75 * Math.max(0, Math.cos(th));
+          const heat = 1.15 - (pR[i] - R_IN) / (R_OUT - R_IN); // hotter near the hole
+          const twinkle = 0.75 + 0.25 * Math.sin(time * 2.2 + pPhase[i]);
+          let alpha = pBright[i] * doppler * twinkle * (0.55 + heat * 0.6);
+          const edgeFade = (pR[i] - R_IN) / 0.35;
+          if (edgeFade < 1) alpha *= Math.max(0, edgeFade);
+          const outFade = (R_OUT - pR[i]) / 0.6;
+          if (outFade < 1) alpha *= Math.max(0, outFade);
+          if (alpha <= 0.02) continue;
+          if (alpha > 1) alpha = 1;
+          const sz = pSize[i] * sizeBoost * (1.4 + heat * 1.8) * 2.1;
+          context.globalAlpha = alpha;
+          context.drawImage(spriteCanvases[keys[pKind[i]]], px - sz / 2, py - sz / 2, sz, sz);
+        }
+        context.globalAlpha = 1;
+      };
+
+      drawDiskHalf(true);
+
+      // --- Gravitational lensing arcs: light from the far side bent over/under the hole ---
+      context.globalCompositeOperation = 'lighter';
+      const topR = rs * 2.05;
+      const botR = rs * 1.62;
+      const arcSteps = isPreview ? 16 : 30;
+      for (let pass = 0; pass < 2; pass++) {
+        const rr = pass === 0 ? topR : botR;
+        const a0 = pass === 0 ? Math.PI * 1.06 : Math.PI * 1.94;
+        const a1 = pass === 0 ? Math.PI * 1.94 : Math.PI * 2.94;
+        for (let sIdx = 0; sIdx <= arcSteps; sIdx++) {
+          const t = sIdx / arcSteps;
+          const ang = a0 + (a1 - a0) * t + spin * 0.35;
+          const x = cx + Math.cos(ang) * rr;
+          const y = cy + Math.sin(ang) * rr * 0.92;
+          const shimmer = 0.55 + 0.45 * Math.sin(t * 9 + time * 2.4 + pass * 2.1);
+          const sz = rs * (0.5 + 0.16 * Math.sin(t * 6 + time)) * (pass === 0 ? 1 : 0.8);
+          context.globalAlpha = 0.16 + 0.2 * shimmer;
+          context.drawImage(arcSprite, x - sz / 2, y - sz / 2, sz, sz);
+        }
+      }
+      context.globalAlpha = 1;
+
+      // --- Event horizon: pure black disk with photon-ring rim glow ---
+      context.globalCompositeOperation = 'source-over';
+      const hr = rs * LENS_R;
+      context.save();
+      context.translate(cx, cy);
+      context.drawImage(ringSprite, -hr * 1.9, -hr * 1.9, hr * 3.8, hr * 3.8);
+      context.globalCompositeOperation = 'lighter';
+      context.drawImage(coreSprite, -hr * 1.6, -hr * 1.6, hr * 3.2, hr * 3.2);
+      context.restore();
+      context.globalCompositeOperation = 'source-over';
+      context.fillStyle = '#000000';
+      context.beginPath();
+      context.arc(cx, cy, hr, 0, Math.PI * 2);
+      context.fill();
+      // Thin crisp photon ring stroke right at the shadow edge.
+      context.strokeStyle = 'rgba(255, 238, 205, 0.55)';
+      context.lineWidth = Math.max(1, rs * 0.035);
+      context.beginPath();
+      context.arc(cx, cy, hr * 1.015, 0, Math.PI * 2);
+      context.stroke();
+
+      // --- Near half of the disk passes in front of the horizon ---
+      drawDiskHalf(false);
+
+      context.globalCompositeOperation = 'source-over';
+
+      if (!isPreview) {
+        context.fillStyle = 'rgba(135, 206, 250, 0.75)';
+        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
+        context.textAlign = 'left';
+        context.fillText('BLACK HOLE: ACCRETION DISK — KEPLERIAN SWIRL, DOPPLER BEAMING & GRAVITATIONAL LENSING ARCS', 28, h - 28);
+      }
+    },
+
+    destroy() {
+      spriteCanvases = null;
+      ringSprite = null;
+      coreSprite = null;
+      arcSprite = null;
+      bgCanvas = null;
+      bgCtx = null;
+      spritesDirty = true;
+      bgDirty = true;
+    }
+  };
+}
+
+/**
+ * 35. CPU (TECHNOLOGY)
+ * Die-shot style processor: silicon substrate with randomized core tiles,
+ * instruction "execution" pulses racing along internal buses, a rotating
+ * heatsink fan above the IHS, live clock-speed telemetry and a flowing
+ * data bus between package pins. Dark theme, low-RAM: geometry is generated
+ * once into typed arrays; everything else is baked sprites + cached backdrop.
+ */
+function createCpu(canvas, isPreview) {
+  let width = 0;
+  let height = 0;
+  let time = 0;
+  let spritesDirty = true;
+  let bgDirty = true;
+  let layoutDirty = true;
+
+  const TRACE_COUNT = isPreview ? 10 : 18;
+  const PULSE_COUNT = isPreview ? 26 : 64;
+  const BG_STAR_COUNT = isPreview ? 60 : 160;
+
+  // Bus traces: each is a polyline of up to 5 waypoints (grid-aligned, Manhattan routing).
+  const tracePts = new Float32Array(TRACE_COUNT * 5 * 2); // normalized coords
+  const traceLen = new Float32Array(TRACE_COUNT);         // total length (normalized units)
+  const traceSegs = new Uint8Array(TRACE_COUNT);          // waypoint count
+  const traceHue = new Float32Array(TRACE_COUNT);         // brightness variation
+
+  // Pulses travel along traces: which trace, position 0..1, speed, size.
+  const pulseTrace = new Uint8Array(PULSE_COUNT);
+  const pulsePos = new Float32Array(PULSE_COUNT);
+  const pulseSpeed = new Float32Array(PULSE_COUNT);
+  const pulseSize = new Float32Array(PULSE_COUNT);
+
+  const bgX = new Float32Array(BG_STAR_COUNT);
+  const bgY = new Float32Array(BG_STAR_COUNT);
+  const bgPhase = new Float32Array(BG_STAR_COUNT);
+
+  let chipSprite = null;   // baked die image (rebuilt only when layout changes)
+  let dotSprite = null;    // pulse glow sprite
+  let bgCanvas = null;
+  let bgCtx = null;
+  let lastChipW = 0;
+
+  function buildSprites() {
+    const c = document.createElement('canvas');
+    const S = 24;
+    c.width = S;
+    c.height = S;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(S / 2, S / 2, 0.5, S / 2, S / 2, S / 2);
+    grad.addColorStop(0, 'rgba(235, 248, 255, 1)');
+    grad.addColorStop(0.3, 'rgba(135, 206, 250, 0.8)');
+    grad.addColorStop(0.65, 'rgba(80, 150, 230, 0.25)');
+    grad.addColorStop(1, 'rgba(60, 120, 220, 0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, S, S);
+    dotSprite = c;
+    spritesDirty = false;
+  }
+
+  /** Deterministically routes Manhattan bus traces across the normalized die area. */
+  function buildLayout() {
+    for (let t = 0; t < TRACE_COUNT; t++) {
+      // Reset per-trace slots to a safe degenerate point first: no stale or zero-length
+      // waypoints can ever leak into baked geometry or pulse interpolation.
+      for (let k = 0; k < 5; k++) { tracePts[t * 10 + k * 2] = 0.5; tracePts[t * 10 + k * 2 + 1] = 0.5; }
+      const edgeFrom = t % 4; // start from N/E/S/W edges alternately
+      let x, y;
+      if (edgeFrom === 0) { x = 0.06 + Math.random() * 0.88; y = 0.02; }
+      else if (edgeFrom === 1) { x = 0.98; y = 0.06 + Math.random() * 0.88; }
+      else if (edgeFrom === 2) { x = 0.06 + Math.random() * 0.88; y = 0.98; }
+      else { x = 0.02; y = 0.06 + Math.random() * 0.88; }
+
+      let n = 1;
+      tracePts[t * 10 + 0] = x;
+      tracePts[t * 10 + 1] = y;
+      for (let k = 2; k < 5; k++) { // pre-fill unused waypoints so stale data can never leak in
+        tracePts[t * 10 + k * 2] = x;
+        tracePts[t * 10 + k * 2 + 1] = y;
+      }
+      let total = 0;
+      let horizontal = edgeFrom === 0 || edgeFrom === 2;
+      for (let k = 1; k < 5; k++) {
+        const targetX = 0.12 + Math.random() * 0.76;
+        const targetY = 0.12 + Math.random() * 0.76;
+        let nx, ny;
+        if (horizontal) { nx = targetX; ny = y; }
+        else { nx = x; ny = targetY; }
+        // Skip degenerate zero-length segments.
+        if (Math.abs(nx - x) + Math.abs(ny - y) > 0.04) {
+          total += Math.abs(nx - x) + Math.abs(ny - y);
+          tracePts[t * 10 + k * 2] = nx;
+          tracePts[t * 10 + k * 2 + 1] = ny;
+          n++;
+          x = nx; y = ny;
+        }
+        horizontal = !horizontal;
+        // Bias final waypoint toward the center (the "core complex").
+        if (k === 4) {
+          const fx = 0.42 + Math.random() * 0.16;
+          const fy = 0.42 + Math.random() * 0.16;
+          total += Math.abs(fx - x) + Math.abs(fy - y);
+          tracePts[t * 10 + 8] = fx;
+          tracePts[t * 10 + 9] = fy;
+          n++;
+        }
+      }
+      traceSegs[t] = n;
+      traceLen[t] = Math.max(0.2, total);
+      traceHue[t] = 0.5 + Math.random() * 0.5;
+    }
+
+    for (let p = 0; p < PULSE_COUNT; p++) {
+      pulseTrace[p] = Math.floor(Math.random() * TRACE_COUNT);
+      pulsePos[p] = Math.random();
+      pulseSpeed[p] = 0.12 + Math.random() * 0.3;
+      pulseSize[p] = 0.6 + Math.random() * 1.2;
+    }
+    layoutDirty = false;
+  }
+
+  function initBgStars() {
+    for (let i = 0; i < BG_STAR_COUNT; i++) {
+      bgX[i] = Math.random();
+      bgY[i] = Math.random();
+      bgPhase[i] = Math.random() * Math.PI * 2;
+    }
+  }
+
+  /** Bakes the entire static die shot (substrate, cores, cache rings, pins, IHS + fan) once. */
+  function buildChip(w, h) {
+    if (!chipSprite) chipSprite = document.createElement('canvas');
+    const cw = Math.max(1, Math.round(w));
+    const ch = Math.max(1, Math.round(h));
+    chipSprite.width = cw;
+    chipSprite.height = ch;
+    const g = chipSprite.getContext('2d');
+    g.clearRect(0, 0, cw, ch);
+
+    const cx = cw / 2;
+    const cy = ch / 2;
+    const die = Math.min(cw * 0.62, ch * 0.62);
+    const x0 = cx - die / 2;
+    const y0 = cy - die / 2;
+
+    // Package substrate with rounded corners and edge bevel.
+    const pad = die * 0.1;
+    g.fillStyle = '#0b1420';
+    roundRect(g, x0 - pad, y0 - pad, die + pad * 2, die + pad * 2, die * 0.045);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.22)';
+    g.lineWidth = Math.max(1, die * 0.004);
+    roundRect(g, x0 - pad, y0 - pad, die + pad * 2, die + pad * 2, die * 0.045);
+    g.stroke();
+
+    // Silicon die base.
+    const dieGrad = g.createLinearGradient(x0, y0, x0 + die, y0 + die);
+    dieGrad.addColorStop(0, '#101c2c');
+    dieGrad.addColorStop(0.5, '#0c1626');
+    dieGrad.addColorStop(1, '#0a1220');
+    g.fillStyle = dieGrad;
+    roundRect(g, x0, y0, die, die, die * 0.03);
+    g.fill();
+
+    // Fine grid etching (cheap lines, baked once).
+    g.strokeStyle = 'rgba(135, 206, 250, 0.05)';
+    g.lineWidth = 1;
+    const gridN = 24;
+    for (let k = 1; k < gridN; k++) {
+      const gx = x0 + (die / gridN) * k;
+      g.beginPath(); g.moveTo(gx, y0); g.lineTo(gx, y0 + die); g.stroke();
+      const gy = y0 + (die / gridN) * k;
+      g.beginPath(); g.moveTo(x0, gy); g.lineTo(x0 + die, gy); g.stroke();
+    }
+
+    // Bus traces etched in copper-blue.
+    for (let t = 0; t < TRACE_COUNT; t++) {
+      g.strokeStyle = `rgba(135, 206, 250, ${0.10 + 0.10 * traceHue[t]})`;
+      g.lineWidth = Math.max(1, die * 0.006);
+      g.lineJoin = 'round';
+      g.beginPath();
+      for (let k = 0; k < traceSegs[t]; k++) {
+        const px = x0 + tracePts[t * 10 + k * 2] * die;
+        const py = y0 + tracePts[t * 10 + k * 2 + 1] * die;
+        if (k === 0) g.moveTo(px, py); else g.lineTo(px, py);
+      }
+      g.stroke();
+    }
+
+    // Core complex: 2x2 big cores + surrounding small tiles + LLC ring.
+    const coreArea = die * 0.52;
+    const acx = cx - coreArea / 2;
+    const acy = cy - coreArea / 2;
+    const cell = coreArea / 2;
+    for (let r = 0; r < 2; r++) {
+      for (let cIdx = 0; cIdx < 2; cIdx++) {
+        const bx = acx + r * cell + cell * 0.08;
+        const by = acy + cIdx * cell + cell * 0.08;
+        const bs = cell * 0.84;
+        g.fillStyle = '#16283e';
+        roundRect(g, bx, by, bs, bs, bs * 0.1);
+        g.fill();
+        g.strokeStyle = 'rgba(135, 206, 250, 0.4)';
+        g.lineWidth = Math.max(1, die * 0.005);
+        roundRect(g, bx, by, bs, bs, bs * 0.1);
+        g.stroke();
+        // Core micro-structure stripes.
+        g.strokeStyle = 'rgba(135, 206, 250, 0.14)';
+        g.lineWidth = 1;
+        for (let sIdx = 1; sIdx < 5; sIdx++) {
+          const sy = by + (bs / 5) * sIdx;
+          g.beginPath(); g.moveTo(bx + bs * 0.1, sy); g.lineTo(bx + bs * 0.9, sy); g.stroke();
+        }
+      }
+    }
+    // LLC ring around the core complex.
+    g.strokeStyle = 'rgba(135, 206, 250, 0.28)';
+    g.lineWidth = Math.max(1.5, die * 0.012);
+    roundRect(g, acx - coreArea * 0.12, acy - coreArea * 0.12, coreArea * 1.24, coreArea * 1.24, die * 0.02);
+    g.stroke();
+
+    // I/O ring pads along die edges (small squares).
+    g.fillStyle = 'rgba(135, 206, 250, 0.16)';
+    const padsPerEdge = 14;
+    for (let k = 0; k < padsPerEdge; k++) {
+      const f = 0.08 + (k / (padsPerEdge - 1)) * 0.84;
+      const ps = die * 0.014;
+      g.fillRect(x0 + f * die - ps / 2, y0 + die * 0.03, ps, ps);
+      g.fillRect(x0 + f * die - ps / 2, y0 + die * 0.97 - ps, ps, ps);
+      g.fillRect(x0 + die * 0.03, y0 + f * die - ps / 2, ps, ps);
+      g.fillRect(x0 + die * 0.97 - ps, y0 + f * die - ps / 2, ps, ps);
+    }
+
+    // Land-side pins under the package (bottom edge rows of dots).
+    g.fillStyle = 'rgba(200, 215, 235, 0.25)';
+    const pinS = Math.max(1.5, die * 0.008);
+    for (let row = 0; row < 3; row++) {
+      for (let col = 0; col < 26; col++) {
+        const px = x0 - pad * 0.7 + (col / 25) * (die + pad * 1.4);
+        const py = y0 + die + pad * 0.35 + row * pinS * 2.6;
+        g.fillRect(px, py, pinS, pinS);
+      }
+    }
+
+    // Integrated heat spreader frame + fan shroud above the die (exploded view).
+    const hsW = die * 0.78;
+    const hsH = die * 0.34;
+    const hsX = cx - hsW / 2;
+    const hsY = y0 - pad - hsH - die * 0.16;
+    g.fillStyle = '#0d1826';
+    roundRect(g, hsX, hsY, hsW, hsH, hsH * 0.14);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.3)';
+    g.lineWidth = Math.max(1, die * 0.004);
+    roundRect(g, hsX, hsY, hsW, hsH, hsH * 0.14);
+    g.stroke();
+
+    // Heatsink fins inside the shroud.
+    g.strokeStyle = 'rgba(135, 206, 250, 0.12)';
+    g.lineWidth = 1;
+    for (let fIdx = 1; fIdx < 12; fIdx++) {
+      const fx = hsX + (hsW / 12) * fIdx;
+      g.beginPath(); g.moveTo(fx, hsY + hsH * 0.12); g.lineTo(fx, hsY + hsH * 0.88); g.stroke();
+    }
+
+    // Fan mount ring + blades are drawn live (rotation), hub marker baked here.
+    g.strokeStyle = 'rgba(135, 206, 250, 0.35)';
+    g.lineWidth = Math.max(1.5, die * 0.008);
+    g.beginPath();
+    g.arc(cx, hsY + hsH / 2, hsH * 0.36, 0, Math.PI * 2);
+    g.stroke();
+
+    // Connector link between shroud and die corner.
+    g.strokeStyle = 'rgba(135, 206, 250, 0.18)';
+    g.setLineDash([die * 0.012, die * 0.012]);
+    g.beginPath();
+    g.moveTo(cx, hsY + hsH);
+    g.lineTo(cx, y0);
+    g.stroke();
+    g.setLineDash([]);
+
+    lastChipW = cw;
+    layoutDirty = false;
+    bgDirty = true;
+  }
+
+  function roundRect(g, x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    g.beginPath();
+    g.moveTo(x + rr, y);
+    g.arcTo(x + w, y, x + w, y + h, rr);
+    g.arcTo(x + w, y + h, x, y + h, rr);
+    g.arcTo(x, y + h, x, y, rr);
+    g.arcTo(x, y, x + w, y, rr);
+    g.closePath();
+  }
+
+  function buildBackground(w, h) {
+    if (!bgCanvas) {
+      bgCanvas = document.createElement('canvas');
+      bgCtx = bgCanvas.getContext('2d');
+    }
+    bgCanvas.width = Math.max(1, Math.round(w));
+    bgCanvas.height = Math.max(1, Math.round(h));
+    const g = bgCtx;
+    g.clearRect(0, 0, w, h);
+    const space = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.1, w / 2, h / 2, Math.max(w, h) * 0.72);
+    space.addColorStop(0, '#04070d');
+    space.addColorStop(0.6, '#02040a');
+    space.addColorStop(1, '#000002');
+    g.fillStyle = space;
+    g.fillRect(0, 0, w, h);
+    bgDirty = false;
+  }
+
+  return {
+    resize(w, h) {
+      width = w;
+      height = h;
+      if (spritesDirty || !dotSprite) buildSprites();
+      if (layoutDirty) buildLayout();
+      buildChip(w, h);
+      initBgStars();
+    },
+
+    update(dt, isHovered) {
+      const motionScale = prefersReducedMotion ? 0.35 : 1.0;
+      const speedMult = (isHovered && !prefersReducedMotion ? 1.5 : 1.0) * motionScale;
+      const stepDt = Math.min(dt, 0.05) * speedMult;
+      time += stepDt;
+
+      for (let p = 0; p < PULSE_COUNT; p++) {
+        pulsePos[p] += pulseSpeed[p] * stepDt;
+        if (pulsePos[p] > 1) {
+          pulsePos[p] = 0;
+          pulseTrace[p] = Math.floor(Math.random() * TRACE_COUNT);
+          pulseSize[p] = 0.6 + Math.random() * 1.2;
+        }
+      }
+    },
+
+    draw(context, w, h) {
+      if (spritesDirty || !dotSprite) buildSprites();
+      if (layoutDirty || !chipSprite) buildChip(w, h); // layoutDirty is set whenever routes are reseeded; width check alone was not a reliable rebuild trigger
+      if (bgDirty || !bgCanvas) buildBackground(w, h);
+
+      context.globalCompositeOperation = 'source-over';
+      context.globalAlpha = 1;
+      context.drawImage(bgCanvas, 0, 0, w, h);
+
+      const cx = w / 2;
+      const cy = h / 2;
+      const die = Math.min(w * 0.62, h * 0.62);
+      const x0 = cx - die / 2;
+      const y0 = cy - die / 2;
+
+      // Faint ambient dust specks (static positions, gentle twinkle).
+      context.fillStyle = '#9fc6ef';
+      for (let i = 0; i < BG_STAR_COUNT; i++) {
+        context.globalAlpha = 0.12 + 0.18 * (0.5 + 0.5 * Math.sin(time * 0.8 + bgPhase[i]));
+        context.fillRect(bgX[i] * w, bgY[i] * h, 1, 1);
+      }
+      context.globalAlpha = 1;
+
+      // Baked die shot.
+      context.drawImage(chipSprite, 0, 0, w, h);
+
+      // Rotating fan inside the shroud circle.
+      const hsH = die * 0.34;
+      const fanR = hsH * 0.34;
+      const fanCx = cx;
+      const fanCy = y0 - die * 0.1 - hsH - die * 0.16 + hsH / 2;
+      const fanAng = time * (prefersReducedMotion ? 1.2 : 3.4);
+      context.save();
+      context.translate(fanCx, fanCy);
+      context.strokeStyle = 'rgba(135, 206, 250, 0.5)';
+      context.lineWidth = Math.max(1.2, fanR * 0.14);
+      context.lineCap = 'round';
+      for (let b = 0; b < 7; b++) {
+        const a = fanAng + (b / 7) * Math.PI * 2;
+        context.beginPath();
+        context.moveTo(Math.cos(a) * fanR * 0.2, Math.sin(a) * fanR * 0.2);
+        context.quadraticCurveTo(
+          Math.cos(a + 0.5) * fanR * 0.7, Math.sin(a + 0.5) * fanR * 0.7,
+          Math.cos(a + 0.28) * fanR * 0.92, Math.sin(a + 0.28) * fanR * 0.92
+        );
+        context.stroke();
+      }
+      context.fillStyle = '#0d1826';
+      context.beginPath();
+      context.arc(0, 0, fanR * 0.22, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = 'rgba(135, 206, 250, 0.6)';
+      context.lineWidth = Math.max(1, fanR * 0.05);
+      context.stroke();
+      context.restore();
+
+      // Execution pulses gliding along bus traces (position interpolated per segment).
+      context.globalCompositeOperation = 'lighter';
+      for (let p = 0; p < PULSE_COUNT; p++) {
+        const t = pulseTrace[p];
+        const segs = Math.max(2, traceSegs[t]); // guarantee at least one interpolable segment
+        const pos = pulsePos[p];
+        // Walk cumulative lengths to find the current segment.
+        let target = pos * traceLen[t];
+        let px = tracePts[t * 10], py = tracePts[t * 10 + 1];
+        let acc = 0;
+        let prevX = px, prevY = py;
+        for (let k = 1; k < segs; k++) {
+          const nx = tracePts[t * 10 + k * 2];
+          const ny = tracePts[t * 10 + k * 2 + 1];
+          const segL = Math.abs(nx - prevX) + Math.abs(ny - prevY);
+          if (acc + segL >= target || k === segs - 1) {
+            const f = segL > 1e-5 ? Math.min(1, Math.max(0, (target - acc) / segL)) : 1;
+            px = prevX + (nx - prevX) * f;
+            py = prevY + (ny - prevY) * f;
+            break;
+          }
+          acc += segL;
+          prevX = nx; prevY = ny;
+          px = prevX; py = prevY;
+        }
+        if (!Number.isFinite(px) || !Number.isFinite(py)) continue; // belt-and-braces: never draw a bad blit
+        const sx = x0 + px * die;
+        const sy = y0 + py * die;
+        const sz = pulseSize[p] * die * 0.035;
+        context.globalAlpha = 0.5 + 0.5 * Math.sin(pos * Math.PI); // fade in/out at ends
+        context.drawImage(dotSprite, sx - sz / 2, sy - sz / 2, sz, sz);
+      }
+      context.globalAlpha = 1;
+      context.globalCompositeOperation = 'source-over';
+
+      // Live telemetry readout (updates ~10 Hz via quantized time, cheap string reuse).
+      if (!isPreview) {
+        const tick = Math.floor(time * 10);
+        const pseudo = Math.abs(Math.sin(tick * 12.9898) * 43758.5453) % 1;
+        const ghz = (3.2 + pseudo * 1.6).toFixed(2);
+        const ipc = (0.8 + ((pseudo * 7.3) % 1) * 2.4).toFixed(2);
+        const temp = (41 + Math.floor(pseudo * 22));
+        context.fillStyle = 'rgba(135, 206, 250, 0.8)';
+        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
+        context.textAlign = 'left';
+        context.fillText(`CPU CLOCK ${ghz} GHZ · IPC ${ipc} · PACKAGE TEMP ${temp} C · BUS WIDTH 64-BIT`, 28, h - 28);
+      }
+    },
+
+    destroy() {
+      chipSprite = null;
+      dotSprite = null;
+      bgCanvas = null;
+      bgCtx = null;
+      spritesDirty = true;
+      bgDirty = true;
+      layoutDirty = true;
+    }
+  };
+}
+
+/**
+ * 36. MOTHERBOARD (TECHNOLOGY)
+ * Full board overview with continuously flowing packet traffic: PCIe lanes,
+ * DIMM banks, VRM chokes, chipset heatsink, ATX power rails and socket —
+ * data packets stream along every trace, RAM slots fill and drain in cycles,
+ * and status LEDs breathe. Dark PCB theme; low-RAM: board art is baked once
+ * to an offscreen canvas, packets/pulses live in flat typed arrays.
+ */
+function createMotherboard(canvas, isPreview) {
+  let width = 0;
+  let height = 0;
+  let time = 0;
+  let spritesDirty = true;
+  let boardDirty = true;
+
+  const ROUTE_COUNT = isPreview ? 14 : 26;
+  const PACKET_PER_ROUTE = isPreview ? 2 : 3;
+  const PACKET_COUNT = ROUTE_COUNT * PACKET_PER_ROUTE;
+
+  // Each route: start (sx,sy) -> mid (mx,my) -> end (ex,ey), normalized board coords.
+  const routeXY = new Float32Array(ROUTE_COUNT * 6);
+  const packetPos = new Float32Array(PACKET_COUNT);   // 0..1 along route
+  const packetSpeed = new Float32Array(PACKET_COUNT);
+  const packetRoute = new Uint8Array(PACKET_COUNT);
+  const ledPhase = new Float32Array(10);
+  const dimmFill = new Float32Array(4);               // 0..1 charge level per DIMM bank
+
+  let boardCanvas = null;
+  let pktSprite = null;
+  let glowSprite = null;
+  let lastBoardW = 0;
+  let lastBoardH = 0;
+
+  function buildSprites() {
+    const mk = (size, stops) => {
+      const c = document.createElement('canvas');
+      c.width = size; c.height = size;
+      const g = c.getContext('2d');
+      const grad = g.createRadialGradient(size / 2, size / 2, 0.5, size / 2, size / 2, size / 2);
+      for (const [pos, color] of stops) grad.addColorStop(pos, color);
+      g.fillStyle = grad;
+      g.fillRect(0, 0, size, size);
+      return c;
+    };
+    pktSprite = mk(16, [
+      [0, 'rgba(240, 250, 255, 1)'],
+      [0.35, 'rgba(135, 206, 250, 0.85)'],
+      [0.7, 'rgba(70, 140, 230, 0.25)'],
+      [1, 'rgba(50, 110, 210, 0)']
+    ]);
+    glowSprite = mk(48, [
+      [0, 'rgba(135, 206, 250, 0.5)'],
+      [0.5, 'rgba(90, 160, 240, 0.15)'],
+      [1, 'rgba(60, 120, 220, 0)']
+    ]);
+    spritesDirty = false;
+  }
+
+  /** Builds logical routes: CPU->DIMMs, CPU->PCIe, PCIe->IO, southbridge->everything. */
+  function buildRoutes() {
+    const anchors = [
+      [0.34, 0.36], // CPU socket center
+      [0.62, 0.30], // DIMM bank A
+      [0.62, 0.44], // DIMM bank B
+      [0.30, 0.66], // PCIe slot 1
+      [0.30, 0.78], // PCIe slot 2
+      [0.78, 0.70], // Chipset (PCH)
+      [0.10, 0.50], // IO panel
+      [0.88, 0.20], // ATX power
+      [0.12, 0.14], // VRM cluster
+      [0.86, 0.88]  // M.2 / header cluster
+    ];
+    for (let r = 0; r < ROUTE_COUNT; r++) {
+      const a = anchors[r % anchors.length];
+      const b = anchors[(r * 3 + 1) % anchors.length];
+      // Manhattan-ish midpoint gives PCB trace character.
+      const horizontalFirst = r % 2 === 0;
+      const mx = horizontalFirst ? b[0] : a[0];
+      const my = horizontalFirst ? a[1] : b[1];
+      routeXY[r * 6 + 0] = a[0];
+      routeXY[r * 6 + 1] = a[1];
+      routeXY[r * 6 + 2] = mx;
+      routeXY[r * 6 + 3] = my;
+      routeXY[r * 6 + 4] = b[0];
+      routeXY[r * 6 + 5] = b[1];
+    }
+    for (let p = 0; p < PACKET_COUNT; p++) {
+      packetRoute[p] = p % ROUTE_COUNT;
+      packetPos[p] = Math.random();
+      packetSpeed[p] = 0.08 + Math.random() * 0.22;
+    }
+    for (let l = 0; l < ledPhase.length; l++) ledPhase[l] = Math.random() * Math.PI * 2;
+  }
+
+  function roundRect(g, x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    g.beginPath();
+    g.moveTo(x + rr, y);
+    g.arcTo(x + w, y, x + w, y + h, rr);
+    g.arcTo(x + w, y + h, x, y + h, rr);
+    g.arcTo(x, y + h, x, y, rr);
+    g.arcTo(x, y, x + w, y, rr);
+    g.closePath();
+  }
+
+  /** Bakes the entire static PCB artwork once per size. */
+  function buildBoard(w, h) {
+    if (!boardCanvas) boardCanvas = document.createElement('canvas');
+    const bw = Math.max(1, Math.round(w));
+    const bh = Math.max(1, Math.round(h));
+    boardCanvas.width = bw;
+    boardCanvas.height = bh;
+    const g = boardCanvas.getContext('2d');
+    g.clearRect(0, 0, bw, bh);
+
+    // Deep-space surround.
+    const space = g.createRadialGradient(bw / 2, bh / 2, Math.min(bw, bh) * 0.12, bw / 2, bh / 2, Math.max(bw, bh) * 0.75);
+    space.addColorStop(0, '#03050b');
+    space.addColorStop(1, '#000002');
+    g.fillStyle = space;
+    g.fillRect(0, 0, bw, bh);
+
+    // Board rectangle (dark matte PCB with subtle vertical sheen).
+    const m = Math.min(bw, bh) * 0.06;
+    const bx = m, by = m, bwd = bw - m * 2, bht = bh - m * 2;
+    const pcb = g.createLinearGradient(bx, by, bx, by + bht);
+    pcb.addColorStop(0, '#0a1622');
+    pcb.addColorStop(0.5, '#08111c');
+    pcb.addColorStop(1, '#0a1622');
+    g.fillStyle = pcb;
+    roundRect(g, bx, by, bwd, bht, Math.min(bw, bh) * 0.015);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.25)';
+    g.lineWidth = Math.max(1, Math.min(bw, bh) * 0.002);
+    roundRect(g, bx, by, bwd, bht, Math.min(bw, bh) * 0.015);
+    g.stroke();
+
+    // Mounting holes at corners.
+    g.strokeStyle = 'rgba(200, 215, 235, 0.3)';
+    const holeR = Math.min(bw, bh) * 0.012;
+    for (const hx of [bx + m * 0.55, bx + bwd - m * 0.55]) {
+      for (const hy of [by + m * 0.55, by + bht - m * 0.55]) {
+        g.beginPath();
+        g.arc(hx, hy, holeR, 0, Math.PI * 2);
+        g.stroke();
+      }
+    }
+
+    const U = Math.min(bw, bh);
+    const X = (f) => bx + f * bwd;
+    const Y = (f) => by + f * bht;
+
+    // Silkscreen hatch grid.
+    g.strokeStyle = 'rgba(135, 206, 250, 0.045)';
+    g.lineWidth = 1;
+    for (let k = 1; k < 20; k++) {
+      g.beginPath(); g.moveTo(X(k / 20), by); g.lineTo(X(k / 20), by + bht); g.stroke();
+      g.beginPath(); g.moveTo(bx, Y(k / 20 * (bht / bwd))); g.lineTo(bx + bwd, Y(k / 20 * (bht / bwd))); g.stroke();
+    }
+
+    // Traces (etched copper paths).
+    g.lineJoin = 'round';
+    for (let r = 0; r < ROUTE_COUNT; r++) {
+      g.strokeStyle = `rgba(135, 206, 250, ${r % 3 === 0 ? 0.16 : 0.10})`;
+      g.lineWidth = Math.max(1, U * 0.0035);
+      g.beginPath();
+      g.moveTo(X(routeXY[r * 6]), Y(routeXY[r * 6 + 1]));
+      g.lineTo(X(routeXY[r * 6 + 2]), Y(routeXY[r * 6 + 3]));
+      g.lineTo(X(routeXY[r * 6 + 4]), Y(routeXY[r * 6 + 5]));
+      g.stroke();
+    }
+
+    // CPU socket with pin grid + retention frame.
+    const sockS = U * 0.20;
+    const sx = X(0.34) - sockS / 2, sy = Y(0.36) - sockS / 2;
+    g.fillStyle = '#0d1a28';
+    roundRect(g, sx, sy, sockS, sockS, sockS * 0.06);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.45)';
+    g.lineWidth = Math.max(1, U * 0.004);
+    roundRect(g, sx, sy, sockS, sockS, sockS * 0.06);
+    g.stroke();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.18)';
+    g.lineWidth = 1;
+    roundRect(g, sx + sockS * 0.14, sy + sockS * 0.14, sockS * 0.72, sockS * 0.72, sockS * 0.04);
+    g.stroke();
+    g.fillStyle = 'rgba(200, 220, 240, 0.22)';
+    const pinDot = Math.max(1, U * 0.0035);
+    for (let pr = 0; pr < 8; pr++) {
+      for (let pc = 0; pc < 8; pc++) {
+        g.fillRect(sx + sockS * 0.2 + pc * sockS * 0.086, sy + sockS * 0.2 + pr * sockS * 0.086, pinDot, pinDot);
+      }
+    }
+
+    // DIMM banks: 4 tall slots right of the socket.
+    const dimmX = X(0.58);
+    const dimmW = U * 0.028;
+    const dimmH = U * 0.30;
+    const dimmY = Y(0.18);
+    for (let d = 0; d < 4; d++) {
+      const dx = dimmX + d * dimmW * 1.9;
+      g.fillStyle = '#0c1826';
+      roundRect(g, dx, dimmY, dimmW, dimmH, dimmW * 0.3);
+      g.fill();
+      g.strokeStyle = 'rgba(135, 206, 250, 0.35)';
+      g.lineWidth = Math.max(1, U * 0.003);
+      roundRect(g, dx, dimmY, dimmW, dimmH, dimmW * 0.3);
+      g.stroke();
+      // Notch + contact comb.
+      g.fillStyle = 'rgba(135, 206, 250, 0.15)';
+      g.fillRect(dx + dimmW * 0.2, dimmY + dimmH * 0.06, dimmW * 0.6, dimmH * 0.05);
+      g.fillRect(dx + dimmW * 0.2, dimmY + dimmH * 0.88, dimmW * 0.6, dimmH * 0.06);
+    }
+
+    // PCIe slots below-left of socket.
+    for (let sIdx = 0; sIdx < 2; sIdx++) {
+      const px = X(0.12), py = Y(0.62 + sIdx * 0.12), pw = U * 0.34, ph = U * 0.026;
+      g.fillStyle = '#0c1826';
+      roundRect(g, px, py, pw, ph, ph * 0.35);
+      g.fill();
+      g.strokeStyle = 'rgba(135, 206, 250, 0.35)';
+      g.lineWidth = Math.max(1, U * 0.003);
+      roundRect(g, px, py, pw, ph, ph * 0.35);
+      g.stroke();
+      g.fillStyle = 'rgba(135, 206, 250, 0.16)';
+      g.fillRect(px + pw * 0.08, py + ph * 0.3, pw * 0.12, ph * 0.4);
+    }
+
+    // VRM chokes: 2 rows of small squares top-left of socket.
+    g.fillStyle = '#101d2c';
+    g.strokeStyle = 'rgba(135, 206, 250, 0.22)';
+    for (let vr = 0; vr < 2; vr++) {
+      for (let vc = 0; vc < 6; vc++) {
+        const vx = X(0.16 + vc * 0.045), vy = Y(0.12 + vr * 0.05);
+        const vs = U * 0.03;
+        g.fillRect(vx, vy, vs, vs);
+        g.strokeRect(vx, vy, vs, vs);
+      }
+    }
+
+    // Chipset (PCH) heatsink: angled plate bottom-right.
+    const chS = U * 0.12;
+    const chx = X(0.78) - chS / 2, chy = Y(0.70) - chS / 2;
+    g.save();
+    g.translate(chx + chS / 2, chy + chS / 2);
+    g.rotate(-0.35);
+    g.fillStyle = '#0e1c2b';
+    roundRect(g, -chS / 2, -chS / 2, chS, chS, chS * 0.12);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.4)';
+    g.lineWidth = Math.max(1, U * 0.004);
+    roundRect(g, -chS / 2, -chS / 2, chS, chS, chS * 0.12);
+    g.stroke();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.16)';
+    g.lineWidth = 1;
+    for (let fIdx = 1; fIdx < 6; fIdx++) {
+      const fy = -chS / 2 + (chS / 6) * fIdx;
+      g.beginPath(); g.moveTo(-chS * 0.4, fy); g.lineTo(chS * 0.4, fy); g.stroke();
+    }
+    g.restore();
+
+    // ATX 24-pin power header top-right.
+    const atxX = X(0.84), atxY = Y(0.14), atxW = U * 0.11, atxH = U * 0.035;
+    g.fillStyle = '#0c1826';
+    roundRect(g, atxX, atxY, atxW, atxH, atxH * 0.25);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.35)';
+    g.lineWidth = Math.max(1, U * 0.003);
+    roundRect(g, atxX, atxY, atxW, atxH, atxH * 0.25);
+    g.stroke();
+    g.fillStyle = 'rgba(200, 220, 240, 0.25)';
+    for (let pin = 0; pin < 12; pin++) {
+      g.fillRect(atxX + atxW * 0.04 + pin * atxW * 0.078, atxY + atxH * 0.3, atxW * 0.04, atxH * 0.4);
+    }
+
+    // IO panel strip on the left edge.
+    const ioX = X(0.03), ioY = Y(0.16), ioW = U * 0.05, ioH = U * 0.42;
+    g.fillStyle = '#101e2e';
+    roundRect(g, ioX, ioY, ioW, ioH, ioW * 0.2);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.4)';
+    roundRect(g, ioX, ioY, ioW, ioH, ioW * 0.2);
+    g.stroke();
+    g.fillStyle = 'rgba(135, 206, 250, 0.18)';
+    for (let port = 0; port < 6; port++) {
+      g.fillRect(ioX + ioW * 0.18, ioY + ioH * 0.06 + port * ioH * 0.155, ioW * 0.64, ioH * 0.09);
+    }
+
+    // Capacitor cans scattered near VRM + PCH.
+    for (let cap = 0; cap < 9; cap++) {
+      const ccx = X(0.14 + (cap % 5) * 0.05 + Math.sin(cap * 3.1) * 0.02);
+      const ccy = Y(0.24 + Math.floor(cap / 5) * 0.06 + 0.5);
+      g.strokeStyle = 'rgba(200, 215, 235, 0.28)';
+      g.lineWidth = Math.max(1, U * 0.0025);
+      g.beginPath();
+      g.arc(ccx, ccy, U * 0.012, 0, Math.PI * 2);
+      g.stroke();
+      g.beginPath();
+      g.arc(ccx, ccy, U * 0.006, 0, Math.PI * 2);
+      g.stroke();
+    }
+
+    // M.2 slot bottom-right corner.
+    const m2X = X(0.66), m2Y = Y(0.88), m2W = U * 0.2, m2H = U * 0.02;
+    g.fillStyle = '#0c1826';
+    roundRect(g, m2X, m2Y, m2W, m2H, m2H * 0.4);
+    g.fill();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.3)';
+    roundRect(g, m2X, m2Y, m2W, m2H, m2H * 0.4);
+    g.stroke();
+
+    // Silkscreen labels (text-only interface).
+    g.fillStyle = 'rgba(135, 206, 250, 0.4)';
+    g.font = `${Math.max(8, U * 0.016)}px monospace`;
+    g.textAlign = 'left';
+    g.fillText('CPU_SOCKET', sx, sy - U * 0.012);
+    g.fillText('DIMM_A1', dimmX, dimmY - U * 0.01);
+    g.fillText('PCIE_X16_1', X(0.12), Y(0.61));
+    g.fillText('PCH', chx, chy - U * 0.012);
+    g.fillText('ATX_PWR', atxX, atxY - U * 0.01);
+    g.fillText('M2_SOCKET', m2X, m2Y - U * 0.008);
+
+    lastBoardW = bw;
+    lastBoardH = bh;
+    boardDirty = false;
+  }
+
+  return {
+    resize(w, h) {
+      width = w;
+      height = h;
+      if (spritesDirty || !pktSprite) buildSprites();
+      buildRoutes();
+      buildBoard(w, h);
+    },
+
+    update(dt, isHovered) {
+      const motionScale = prefersReducedMotion ? 0.35 : 1.0;
+      const speedMult = (isHovered && !prefersReducedMotion ? 1.5 : 1.0) * motionScale;
+      const stepDt = Math.min(dt, 0.05) * speedMult;
+      time += stepDt;
+
+      for (let p = 0; p < PACKET_COUNT; p++) {
+        packetPos[p] += packetSpeed[p] * stepDt;
+        if (packetPos[p] > 1) {
+          packetPos[p] = 0;
+          packetSpeed[p] = 0.08 + Math.random() * 0.22;
+        }
+      }
+      // DIMM banks cycle charge/discharge like memory being filled.
+      for (let d = 0; d < 4; d++) {
+        const rate = 0.12 + 0.05 * d;
+        dimmFill[d] += rate * stepDt;
+        if (dimmFill[d] > 1.35) dimmFill[d] = 0;
+      }
+    },
+
+    draw(context, w, h) {
+      if (spritesDirty || !pktSprite) buildSprites();
+      if (boardDirty || !boardCanvas || lastBoardW !== Math.round(w) || lastBoardH !== Math.round(h)) {
+        buildRoutes();
+        buildBoard(w, h);
+      }
+
+      const m = Math.min(w, h) * 0.06;
+      const bx = m, by = m, bwd = w - m * 2, bht = h - m * 2;
+      const X = (f) => bx + f * bwd;
+      const Y = (f) => by + f * bht;
+      const U = Math.min(w, h);
+
+      context.globalCompositeOperation = 'source-over';
+      context.globalAlpha = 1;
+      context.drawImage(boardCanvas, 0, 0, w, h);
+
+      // DIMM activity: glowing charge column rising inside each slot.
+      context.globalCompositeOperation = 'lighter';
+      const dimmX = X(0.58);
+      const dimmW = U * 0.028;
+      const dimmH = U * 0.30;
+      const dimmY = Y(0.18);
+      for (let d = 0; d < 4; d++) {
+        const lvl = Math.min(1, dimmFill[d]);
+        const dx = dimmX + d * dimmW * 1.9;
+        const fh = dimmH * 0.86 * lvl;
+        context.globalAlpha = 0.35;
+        context.drawImage(glowSprite, dx - dimmW * 0.3, dimmY + dimmH * 0.93 - fh - dimmW * 0.4, dimmW * 1.6, fh + dimmW * 0.8);
+      }
+      context.globalAlpha = 1;
+
+      // Packets streaming along routes (quadratic-ish walk through 3 control points).
+      for (let p = 0; p < PACKET_COUNT; p++) {
+        const r = packetRoute[p];
+        const t = packetPos[p];
+        const ax = X(routeXY[r * 6]), ay = Y(routeXY[r * 6 + 1]);
+        const mx = X(routeXY[r * 6 + 2]), my = Y(routeXY[r * 6 + 3]);
+        const ex = X(routeXY[r * 6 + 4]), ey = Y(routeXY[r * 6 + 5]);
+        // Piecewise linear: first leg then second leg (Manhattan feel).
+        let px, py;
+        if (t < 0.5) { const f = t * 2; px = ax + (mx - ax) * f; py = ay + (my - ay) * f; }
+        else { const f = (t - 0.5) * 2; px = mx + (ex - mx) * f; py = my + (ey - my) * f; }
+        const sz = U * 0.028;
+        context.globalAlpha = 0.45 + 0.55 * Math.sin(t * Math.PI);
+        context.drawImage(pktSprite, px - sz / 2, py - sz / 2, sz, sz);
+      }
+      context.globalAlpha = 1;
+
+      // Breathing status LEDs (tiny additive dots at fixed board spots).
+      const ledSpots = [
+        [0.06, 0.66], [0.06, 0.70], [0.06, 0.74],
+        [0.52, 0.90], [0.60, 0.90], [0.68, 0.90],
+        [0.90, 0.30], [0.90, 0.36], [0.90, 0.42], [0.50, 0.08]
+      ];
+      for (let l = 0; l < ledSpots.length; l++) {
+        const breathe = 0.5 + 0.5 * Math.sin(time * (0.8 + l * 0.13) + ledPhase[l]);
+        context.globalAlpha = 0.25 + 0.6 * breathe;
+        const lx = X(ledSpots[l][0]), ly = Y(ledSpots[l][1]);
+        const ls = U * (0.012 + 0.008 * breathe);
+        context.drawImage(pktSprite, lx - ls / 2, ly - ls / 2, ls, ls);
+      }
+      context.globalAlpha = 1;
+      context.globalCompositeOperation = 'source-over';
+
+      if (!isPreview) {
+        context.fillStyle = 'rgba(135, 206, 250, 0.75)';
+        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
+        context.textAlign = 'left';
+        context.fillText('MOTHERBOARD: PCIe / DDR TRAFFIC MONITOR — PACKETS IN FLIGHT, DIMM BANKS CYCLING, POWER RAILS LIVE', 28, h - 28);
+      }
+    },
+
+    destroy() {
+      boardCanvas = null;
+      pktSprite = null;
+      glowSprite = null;
+      spritesDirty = true;
+      boardDirty = true;
+    }
+  };
+}
+
+/**
+ * 37. REAL TIME CLOCK (TECHNOLOGY)
+ * Analog wall clock driven by the actual system time: hour, minute and
+ * sweeping second hands, Roman-free numbered dial, date + full digital
+ * readout beneath, and a starfield backdrop that matches the dark theme.
+ * The second hand uses sub-second interpolation so it glides smoothly
+ * instead of ticking; redraw cost is trivial (one cached face blit + hands).
+ */
+function createRealTimeClock(canvas, isPreview) {
+  let width = 0;
+  let height = 0;
+  let time = 0;
+  let faceDirty = true;
+  let bgDirty = true;
+
+  const BG_STAR_COUNT = isPreview ? 90 : 320;
+  const bgX = new Float32Array(BG_STAR_COUNT);
+  const bgY = new Float32Array(BG_STAR_COUNT);
+  const bgSize = new Float32Array(BG_STAR_COUNT);
+  const bgPhase = new Float32Array(BG_STAR_COUNT);
+  const bgRate = new Float32Array(BG_STAR_COUNT);
+
+  let faceCanvas = null;   // baked clock dial (ticks, numerals, bezel)
+  let glowSprite = null;   // soft halo behind the clock
+  let bgCanvas = null;
+  let bgCtx = null;
+  let lastFaceR = 0;
+
+  const MONTHS = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+    'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+  const DAYS = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+
+  function buildSprites() {
+    const S = 256;
+    const c = document.createElement('canvas');
+    c.width = S; c.height = S;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(S / 2, S / 2, S * 0.1, S / 2, S / 2, S / 2);
+    grad.addColorStop(0, 'rgba(135, 206, 250, 0.16)');
+    grad.addColorStop(0.6, 'rgba(90, 150, 230, 0.06)');
+    grad.addColorStop(1, 'rgba(60, 110, 200, 0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, S, S);
+    glowSprite = c;
+  }
+
+  /** Bakes bezel, minute track, hour ticks and numerals once per size. */
+  function buildFace(r) {
+    if (!faceCanvas) faceCanvas = document.createElement('canvas');
+    const size = Math.max(2, Math.ceil(r * 2 + 8));
+    faceCanvas.width = size;
+    faceCanvas.height = size;
+    const g = faceCanvas.getContext('2d');
+    const c = size / 2;
+
+    g.clearRect(0, 0, size, size);
+
+    // Outer bezel rings.
+    g.strokeStyle = 'rgba(135, 206, 250, 0.55)';
+    g.lineWidth = Math.max(1.5, r * 0.02);
+    g.beginPath(); g.arc(c, c, r, 0, Math.PI * 2); g.stroke();
+    g.strokeStyle = 'rgba(135, 206, 250, 0.18)';
+    g.lineWidth = Math.max(1, r * 0.01);
+    g.beginPath(); g.arc(c, c, r * 0.94, 0, Math.PI * 2); g.stroke();
+
+    // Dial face fill.
+    const face = g.createRadialGradient(c, c, r * 0.1, c, c, r * 0.94);
+    face.addColorStop(0, '#0a1220');
+    face.addColorStop(1, '#04070d');
+    g.fillStyle = face;
+    g.beginPath(); g.arc(c, c, r * 0.93, 0, Math.PI * 2); g.fill();
+
+    // Minute track: 60 ticks, hour ticks longer/brighter.
+    for (let tk = 0; tk < 60; tk++) {
+      const a = (tk / 60) * Math.PI * 2 - Math.PI / 2;
+      const isHour = tk % 5 === 0;
+      const r1 = r * (isHour ? 0.82 : 0.88);
+      const r2 = r * 0.92;
+      g.strokeStyle = isHour ? 'rgba(235, 244, 255, 0.85)' : 'rgba(135, 206, 250, 0.35)';
+      g.lineWidth = Math.max(1, r * (isHour ? 0.016 : 0.007));
+      g.beginPath();
+      g.moveTo(c + Math.cos(a) * r1, c + Math.sin(a) * r1);
+      g.lineTo(c + Math.cos(a) * r2, c + Math.sin(a) * r2);
+      g.stroke();
+    }
+
+    // Numerals 1..12.
+    g.fillStyle = 'rgba(235, 244, 255, 0.9)';
+    g.font = `600 ${Math.max(9, r * 0.13)}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    for (let n = 1; n <= 12; n++) {
+      const a = (n / 12) * Math.PI * 2 - Math.PI / 2;
+      g.fillText(String(n), c + Math.cos(a) * r * 0.7, c + Math.sin(a) * r * 0.7);
+    }
+
+    // Cardinal marks text-only flourish.
+    g.fillStyle = 'rgba(135, 206, 250, 0.5)';
+    g.font = `${Math.max(7, r * 0.05)}px monospace`;
+    g.fillText('REAL TIME', c, c - r * 0.42);
+    g.fillText('LOCAL', c, c + r * 0.5);
+
+    lastFaceR = r;
+    faceDirty = false;
+  }
+
+  function initBgStars() {
+    for (let i = 0; i < BG_STAR_COUNT; i++) {
+      bgX[i] = Math.random();
+      bgY[i] = Math.random();
+      bgSize[i] = 0.5 + Math.random() * 1.3;
+      bgPhase[i] = Math.random() * Math.PI * 2;
+      bgRate[i] = 0.15 + Math.random() * 0.5;
+    }
+  }
+
+  function buildBackground(w, h) {
+    if (!bgCanvas) {
+      bgCanvas = document.createElement('canvas');
+      bgCtx = bgCanvas.getContext('2d');
+    }
+    bgCanvas.width = Math.max(1, Math.round(w));
+    bgCanvas.height = Math.max(1, Math.round(h));
+    const g = bgCtx;
+    g.clearRect(0, 0, w, h);
+    const space = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.1, w / 2, h / 2, Math.max(w, h) * 0.75);
+    space.addColorStop(0, '#04060d');
+    space.addColorStop(0.55, '#02030a');
+    space.addColorStop(1, '#000002');
+    g.fillStyle = space;
+    g.fillRect(0, 0, w, h);
+    bgDirty = false;
+  }
+
+  return {
+    resize(w, h) {
+      width = w;
+      height = h;
+      if (!glowSprite) buildSprites();
+      faceDirty = true;
+      bgDirty = true;
+      initBgStars();
+    },
+
+    update(dt) {
+      const stepDt = Math.min(dt, 0.05);
+      time += stepDt;
+    },
+
+    draw(context, w, h) {
+      if (bgDirty || !bgCanvas) buildBackground(w, h);
+
+      const cx = w / 2;
+      const cy = h * (isPreview ? 0.46 : 0.44);
+      const r = Math.min(w, h) * (isPreview ? 0.34 : 0.30);
+      if (faceDirty || !faceCanvas || Math.abs(lastFaceR - r) > 0.5) buildFace(r);
+
+      context.globalCompositeOperation = 'source-over';
+      context.globalAlpha = 1;
+      context.drawImage(bgCanvas, 0, 0, w, h);
+
+      // Twinkling stars.
+      context.fillStyle = '#cfe0ff';
+      for (let i = 0; i < BG_STAR_COUNT; i++) {
+        const tw = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(time * bgRate[i] * 2 + bgPhase[i]));
+        context.globalAlpha = tw * 0.7;
+        context.fillRect(bgX[i] * w, bgY[i] * h, bgSize[i], bgSize[i]);
+      }
+      context.globalAlpha = 1;
+
+      // Halo behind the clock.
+      context.globalCompositeOperation = 'lighter';
+      const gs = r * 3.4;
+      context.drawImage(glowSprite, cx - gs / 2, cy - gs / 2, gs, gs);
+      context.globalCompositeOperation = 'source-over';
+
+      // Now: smooth sub-second interpolation for a silent sweep.
+      const now = new Date();
+      const ms = now.getMilliseconds();
+      const secF = now.getSeconds() + ms / 1000;
+      const minF = now.getMinutes() + secF / 60;
+      const hrF = (now.getHours() % 12) + minF / 60;
+
+      const faceSize = faceCanvas.width;
+      context.drawImage(faceCanvas, cx - faceSize / 2, cy - faceSize / 2, faceSize, faceSize);
+
+      const ang = (f, div) => (f / div) * Math.PI * 2 - Math.PI / 2;
+
+      const drawHand = (angle, len, wid, color, tail) => {
+        context.save();
+        context.translate(cx, cy);
+        context.rotate(angle + Math.PI / 2);
+        context.strokeStyle = color;
+        context.lineWidth = Math.max(1, r * wid);
+        context.lineCap = 'round';
+        context.beginPath();
+        context.moveTo(0, r * tail);
+        context.lineTo(0, -r * len);
+        context.stroke();
+        context.restore();
+      };
+
+      // Hour, minute, second hands (second hand sweeps; reduced-motion falls back to tick).
+      drawHand(ang(hrF, 12), 0.5, 0.035, 'rgba(235, 244, 255, 0.95)', 0.1);
+      drawHand(ang(minF, 60), 0.72, 0.022, 'rgba(235, 244, 255, 0.9)', 0.14);
+      const secAngle = prefersReducedMotion ? Math.floor(secF) : secF;
+      drawHand(ang(secAngle, 60), 0.8, 0.01, 'rgba(135, 206, 250, 0.95)', 0.18);
+
+      // Center cap + second pip.
+      context.fillStyle = '#0a1220';
+      context.beginPath();
+      context.arc(cx, cy, r * 0.045, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = 'rgba(135, 206, 250, 0.9)';
+      context.lineWidth = Math.max(1, r * 0.012);
+      context.stroke();
+      context.fillStyle = 'rgba(135, 206, 250, 0.95)';
+      context.beginPath();
+      context.arc(cx, cy, r * 0.016, 0, Math.PI * 2);
+      context.fill();
+
+      // Digital readout: HH:MM:SS AM/PM + weekday/date + timezone.
+      const hh = now.getHours();
+      const ampm = hh >= 12 ? 'PM' : 'AM';
+      const h12 = hh % 12 === 0 ? 12 : hh % 12;
+      const pad2 = (n) => String(n).padStart(2, '0');
+      const digital = `${h12}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())} ${ampm}`;
+
+      const fsBig = Math.max(14, r * (isPreview ? 0.24 : 0.2));
+      const fsSmall = Math.max(9, r * 0.075);
+      const baseY = cy + r + fsBig * (isPreview ? 0.85 : 1.05);
+
+      context.textAlign = 'center';
+      context.textBaseline = 'alphabetic';
+      context.fillStyle = 'rgba(235, 244, 255, 0.95)';
+      context.font = `600 ${fsBig}px -apple-system, BlinkMacSystemFont, "Segoe UI", monospace`;
+      context.fillText(digital, cx, baseY);
+
+      const dateLine = `${DAYS[now.getDay()]} · ${now.getDate()} ${MONTHS[now.getMonth()]} ${now.getFullYear()}`;
+      context.fillStyle = 'rgba(135, 206, 250, 0.8)';
+      context.font = `${fsSmall}px -apple-system, BlinkMacSystemFont, monospace`;
+      context.fillText(dateLine, cx, baseY + fsSmall * 1.7);
+
+      if (!isPreview) {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'LOCAL';
+        context.fillStyle = 'rgba(135, 206, 250, 0.6)';
+        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
+        context.textAlign = 'left';
+        context.fillText(`REAL TIME CLOCK: SYSTEM-SYNCURED ANALOG SWEEP — ${tz}`, 28, h - 28);
+      }
+      context.textAlign = 'left';
+    },
+
+    destroy() {
+      faceCanvas = null;
+      glowSprite = null;
+      bgCanvas = null;
+      bgCtx = null;
+      faceDirty = true;
+      bgDirty = true;
     }
   };
 }
