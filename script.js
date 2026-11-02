@@ -3611,18 +3611,22 @@ function drawChromatidV(ctx, x, y, size, dir) {
 }
 
 /**
- * 23. SPIDER-MAN (CINEMATIC WORLDS) — POLISHED REBUILD
- * A cinematic night-sky web swing across a procedurally lit Manhattan canyon:
- * pendulum physics with energy pumping, acrobatic release flips, web-line
- * firing with recoil pose, and three parallax skylines whose lit windows are
- * baked once into cached strip canvases.
+ * 23. SPIDER-MAN (CINEMATIC WORLDS) — FLUID ARTICULATED REBUILD
+ * A cinematic night-sky web swing across a procedurally lit Manhattan canyon,
+ * rebuilt around one principle: the hero is a *live articulated figure*, not
+ * a handful of baked frames replayed on a loop. Every joint angle is driven
+ * each frame by critically-damped spring interpolation toward pose targets
+ * chosen from the pendulum's own state (angle, angular velocity), so motion
+ * reads as continuous animation instead of repetitive video frames. The web
+ * throw is its own choreographed sequence: wrist-first shot, growing anchor
+ * splat with radial spokes, load-up sag collapse as tension comes on, muzzle
+ * flash at the wrist and drifting silk spores along the strand.
  *
- * Low-RAM architecture: the skyline layers, moon halo, starfield, web strand
- * sprite and hero glow are pre-rendered offscreen at resize; per-frame work is
- * two blits per layer plus one transformed hero sprite. The hero figure is a
- * vector drawing baked into four pose atlases (swing, tuck-flip x2, landing
- * lunge) so no path work happens during animation frames. Reduced-motion and
- * hover feedback scale the simulation clock, never the geometry.
+ * Low-RAM architecture: skyline strips, sky and glow sprites are baked once
+ * per resize; per-frame work is two blits per layer plus one vector skeleton
+ * pass (batched strokes, no gradients, no shadowBlur, no allocations outside
+ * reused scratch arrays), and flat typed-array pools for spores and speed
+ * dust. Reduced-motion and hover scale the simulation clock only.
  */
 function createSpiderMan(canvas, isPreview) {
   let width = 0;
@@ -3639,12 +3643,18 @@ function createSpiderMan(canvas, isPreview) {
     };
   }
 
+  const TAU = Math.PI * 2;
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function smoothstep(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+  function easeOutCubic(t) { const u = 1 - clamp(t, 0, 1); return 1 - u * u * u; }
+  function shortestAngle(a) { return Math.atan2(Math.sin(a), Math.cos(a)); }
+
   // ------------------------------------------------------------------
   // Cached scenery layers (rebuilt only on resize)
   // ------------------------------------------------------------------
 
   const LAYER_DEFS = [
-    // dist, speed, body color, width range, height range, window chance, win alpha
     { dist: 0.20, speed: 0.16, body: '#070b15', wMin: 46, wMax: 84, hMin: 0.40, hMax: 0.30, winChance: 0.10, winAlpha: 0.16, crown: false },
     { dist: 0.55, speed: 0.42, body: '#0a101f', wMin: 60, wMax: 104, hMin: 0.46, hMax: 0.36, winChance: 0.16, winAlpha: 0.24, crown: true },
     { dist: 0.90, speed: 0.85, body: '#0e1626', wMin: 92, wMax: 150, hMin: 0.55, hMax: 0.36, winChance: 0.22, winAlpha: 0.34, crown: true }
@@ -3678,7 +3688,6 @@ function createSpiderMan(canvas, isPreview) {
     g.fillStyle = grad;
     g.fillRect(0, 0, w, h);
 
-    // Faint stars, upper half only (city glow swallows the horizon).
     const rnd = mulberry32(24601);
     const starCount = isPreview ? 40 : 90;
     for (let i = 0; i < starCount; i++) {
@@ -3691,7 +3700,6 @@ function createSpiderMan(canvas, isPreview) {
       g.fill();
     }
 
-    // Full moon with layered cool halo.
     const mx = w * 0.8;
     const my = h * 0.18;
     const mr = isPreview ? 13 : 22;
@@ -3714,7 +3722,6 @@ function createSpiderMan(canvas, isPreview) {
     g.arc(mx + mr * 0.1, my - mr * 0.45, mr * 0.12, 0, Math.PI * 2);
     g.fill();
 
-    // Warm city haze rising from the street line.
     const haze = g.createLinearGradient(0, h * 0.72, 0, h);
     haze.addColorStop(0, 'rgba(255, 196, 120, 0)');
     haze.addColorStop(1, 'rgba(255, 186, 110, 0.10)');
@@ -3722,8 +3729,6 @@ function createSpiderMan(canvas, isPreview) {
     g.fillRect(0, h * 0.72, w, h * 0.28);
   }
 
-  // Beacon positions are collected while baking each layer so the live blink
-  // dots sit exactly on real antenna tips (tiny Float32 arrays, no objects).
   const layerBeacons = [];
 
   function buildLayer(def, w, h) {
@@ -3744,7 +3749,6 @@ function createSpiderMan(canvas, isPreview) {
     const winH = Math.max(3, Math.round(cell * 0.9));
     const beacons = [];
 
-    // Pass 1: building bodies with crowns, antennas and rooftop tanks.
     let x = -20;
     while (x < stripW + 20) {
       const bw = def.wMin + rnd() * (def.wMax - def.wMin);
@@ -3765,7 +3769,6 @@ function createSpiderMan(canvas, isPreview) {
         g.fillRect(x + bw * 0.5 - 1, by - ah, 2, ah);
         beacons.push(x + bw * 0.5, by - ah);
       }
-      // Rooftop water tank silhouette for texture.
       if (bw > 80 && rnd() > 0.6) {
         const tw = 12 + rnd() * 10;
         const tx = x + bw * (0.2 + rnd() * 0.5);
@@ -3775,7 +3778,6 @@ function createSpiderMan(canvas, isPreview) {
       x += bw + 4 + rnd() * 18;
     }
 
-    // Pass 2: lit windows (two warm tones), deterministic per building slot.
     x = -20;
     while (x < stripW + 20) {
       const bw = def.wMin + rnd() * (def.wMax - def.wMin);
@@ -3829,271 +3831,514 @@ function createSpiderMan(canvas, isPreview) {
   }
 
   // ------------------------------------------------------------------
-  // Web strand sprite: baked taper + subtle braided cross-hatch
+  // Baked glow sprites (moonlight rim, warm bounce, web flash)
   // ------------------------------------------------------------------
 
-  let webSprite = null;
-  const WEB_SPRITE_LEN = 192;
+  const rimGlowSprite = { canvas: null };
+  const warmGlowSprite = { canvas: null };
+  const flashSprite = { canvas: null };
 
-  function buildWebSprite() {
-    webSprite = makeCanvas();
-    webSprite.width = WEB_SPRITE_LEN;
-    webSprite.height = 12;
-    const g = webSprite.getContext('2d');
-    g.clearRect(0, 0, WEB_SPRITE_LEN, 12);
-    g.lineCap = 'round';
-    // Core strand, tapered toward the shooter's hand.
-    g.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-    g.lineWidth = 1.6;
-    g.beginPath();
-    g.moveTo(1, 6);
-    g.lineTo(WEB_SPRITE_LEN - 24, 6);
-    g.stroke();
-    g.strokeStyle = 'rgba(210, 235, 255, 0.45)';
-    g.lineWidth = 1;
-    g.beginPath();
-    g.moveTo(WEB_SPRITE_LEN - 24, 6);
-    g.lineTo(WEB_SPRITE_LEN - 2, 6);
-    g.stroke();
-    // Braided highlight ticks.
-    g.strokeStyle = 'rgba(255, 255, 255, 0.28)';
-    g.lineWidth = 0.8;
-    for (let x = 10; x < WEB_SPRITE_LEN - 16; x += 14) {
-      g.beginPath();
-      g.moveTo(x, 3.4);
-      g.lineTo(x + 6, 8.6);
-      g.stroke();
-    }
-    // Anchor rosette at the far end.
-    g.fillStyle = 'rgba(255, 255, 255, 0.75)';
-    g.beginPath();
-    g.arc(WEB_SPRITE_LEN - 3, 6, 2.2, 0, Math.PI * 2);
-    g.fill();
-    g.strokeStyle = 'rgba(255, 255, 255, 0.35)';
-    for (let a = 0; a < 6; a++) {
-      const ang = (a / 6) * Math.PI * 2;
-      g.beginPath();
-      g.moveTo(WEB_SPRITE_LEN - 3, 6);
-      g.lineTo(WEB_SPRITE_LEN - 3 + Math.cos(ang) * 5, 6 + Math.sin(ang) * 5);
-      g.stroke();
-    }
+  function bakeRadialSprite(holder, size, stops) {
+    if (!holder.canvas) holder.canvas = makeCanvas();
+    const c = holder.canvas;
+    c.width = size;
+    c.height = size;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, size, size);
+    const grad = g.createRadialGradient(size / 2, size / 2, size * 0.04, size / 2, size / 2, size / 2);
+    for (const s of stops) grad.addColorStop(s[0], s[1]);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
   }
 
-  function drawWebStrand(g, ax, ay, bx, by) {
-    const dx = bx - ax;
-    const dy = by - ay;
+  function buildGlowSprites() {
+    const rimSize = isPreview ? 64 : 112;
+    bakeRadialSprite(rimGlowSprite, rimSize, [
+      [0, 'rgba(205, 228, 255, 0.30)'],
+      [0.5, 'rgba(135, 206, 250, 0.10)'],
+      [1, 'rgba(135, 206, 250, 0)']
+    ]);
+    bakeRadialSprite(warmGlowSprite, rimSize, [
+      [0, 'rgba(255, 196, 128, 0.20)'],
+      [0.55, 'rgba(255, 170, 96, 0.07)'],
+      [1, 'rgba(255, 170, 96, 0)']
+    ]);
+    bakeRadialSprite(flashSprite, isPreview ? 48 : 96, [
+      [0, 'rgba(255, 255, 255, 0.9)'],
+      [0.3, 'rgba(214, 238, 255, 0.45)'],
+      [1, 'rgba(214, 238, 255, 0)']
+    ]);
+  }
+
+  // ------------------------------------------------------------------
+  // Web strand: live silk line — soft glow underlay, crisp core taper and
+  // slow phase-shifted braided ticks (no sprite tiling => no marching).
+  // ------------------------------------------------------------------
+
+  const WEB_SAMPLES = 10;
+  const webX = new Float32Array(WEB_SAMPLES);
+  const webY = new Float32Array(WEB_SAMPLES);
+
+  function drawWebStrand(g, ax, ay, bx, by, sagPx, alpha, thickness, phase) {
+    const dx = bx - ax, dy = by - ay;
     const len = Math.hypot(dx, dy);
     if (len < 2) return;
+    // Sag always bows downward (gravity), scaled by slack amount.
+    const cxm = (ax + bx) / 2;
+    const cym = (ay + by) / 2 + sagPx;
 
-    // Gentle catenary sag perpendicular to the strand under load.
-    const sag = Math.min(14, len * 0.05);
-    const midY = (ay + by) / 2 + sag;
+    for (let s = 0; s < WEB_SAMPLES; s++) {
+      const t = s / (WEB_SAMPLES - 1);
+      const mt = 1 - t;
+      webX[s] = mt * mt * ax + 2 * mt * t * cxm + t * t * bx;
+      webY[s] = mt * mt * ay + 2 * mt * t * cym + t * t * by;
+    }
 
     g.save();
-    g.globalAlpha = 0.95;
-    for (let s = 0; s <= 8; s++) {
-      const t = s / 8;
-      const mt = 1 - t;
-      // Quadratic bezier point (anchor -> control below midpoint -> hand).
-      const px = mt * mt * ax + 2 * mt * t * ((ax + bx) / 2) + t * t * bx;
-      const py = mt * mt * ay + 2 * mt * t * midY + t * t * by;
-      if (s < 8) {
-        const t2 = (s + 1) / 8;
-        const mt2 = 1 - t2;
-        const qx = mt2 * mt2 * ax + 2 * mt2 * t2 * ((ax + bx) / 2) + t2 * t2 * bx;
-        const qy = mt2 * mt2 * ay + 2 * mt2 * t2 * midY + t2 * t2 * by;
-        const segLen = Math.hypot(qx - px, qy - py);
-        g.save();
-        g.translate(px, py);
-        g.rotate(Math.atan2(qy - py, qx - px));
-        g.drawImage(webSprite, 0, -6, segLen + 1.5, 12);
-        g.restore();
-      }
+    g.globalAlpha = alpha;
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+
+    // Soft cool glow underlay.
+    g.beginPath();
+    g.moveTo(webX[0], webY[0]);
+    for (let s = 1; s < WEB_SAMPLES; s++) g.lineTo(webX[s], webY[s]);
+    g.strokeStyle = 'rgba(190, 222, 255, 0.22)';
+    g.lineWidth = 4.2 * thickness;
+    g.stroke();
+
+    // Crisp core strand with a slight anchor->wrist taper (two passes).
+    g.strokeStyle = 'rgba(240, 247, 255, 0.95)';
+    g.lineWidth = 1.5 * thickness;
+    g.stroke();
+    g.lineWidth = 0.8 * thickness;
+    g.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    g.stroke();
+
+    // Braided cross ticks drifting slowly along the strand.
+    g.strokeStyle = 'rgba(255, 255, 255, 0.30)';
+    g.lineWidth = 0.8;
+    const spacing = 16;
+    const ph = ((phase || 0) * 5) % spacing;
+    for (let d = ph; d < len - 8; d += spacing) {
+      const sIdx = clamp(Math.floor(d / len * (WEB_SAMPLES - 1)), 0, WEB_SAMPLES - 2);
+      const f = (d / len) * (WEB_SAMPLES - 1) - sIdx;
+      const px = lerp(webX[sIdx], webX[sIdx + 1], f);
+      const py = lerp(webY[sIdx], webY[sIdx + 1], f);
+      let tx = webX[sIdx + 1] - webX[sIdx], ty = webY[sIdx + 1] - webY[sIdx];
+      const tl = Math.hypot(tx, ty) || 1;
+      tx /= tl; ty /= tl;
+      g.beginPath();
+      g.moveTo(px - ty * 2.4, py + tx * 2.4);
+      g.lineTo(px + ty * 2.4, py - tx * 2.4);
+      g.stroke();
+    }
+    g.restore();
+  }
+
+  function drawAnchorSplat(g, x, y, r, alpha) {
+    if (r <= 0.5) return;
+    g.save();
+    g.globalAlpha = alpha;
+    g.fillStyle = 'rgba(244, 249, 255, 0.9)';
+    g.beginPath();
+    g.arc(x, y, r, 0, TAU);
+    g.fill();
+    g.strokeStyle = 'rgba(244, 249, 255, 0.7)';
+    g.lineWidth = 0.9;
+    for (let k = 0; k < 7; k++) {
+      const a = k * (TAU / 7) + 0.35;
+      g.beginPath();
+      g.moveTo(x + Math.cos(a) * r * 0.4, y + Math.sin(a) * r * 0.4);
+      g.lineTo(x + Math.cos(a) * r * 2.1, y + Math.sin(a) * r * 2.1);
+      g.stroke();
     }
     g.restore();
   }
 
   // ------------------------------------------------------------------
-  // Hero figure: drawn once per pose into baked atlases
+  // Particle pools (flat typed arrays, fixed capacity, zero churn)
   // ------------------------------------------------------------------
 
-  const HERO_UNIT = 15;              // torso half-height in unit space
-  const POSE_SWING = 0, POSE_FLIP_A = 1, POSE_FLIP_B = 2, POSE_LUNGE = 3;
-  const POSE_COUNT = 4;
-  const heroPoses = [];
-  let heroGlowSprite = null;
+  const SPORE_MAX = isPreview ? 26 : 54;
+  const sporeX = new Float32Array(SPORE_MAX);
+  const sporeY = new Float32Array(SPORE_MAX);
+  const sporeVX = new Float32Array(SPORE_MAX);
+  const sporeVY = new Float32Array(SPORE_MAX);
+  const sporeAge = new Float32Array(SPORE_MAX);
+  const sporeLife = new Float32Array(SPORE_MAX);
+  let sporeHead = 0;
 
-  function paintHeroBody(g) {
-    // All coordinates in unit space; torso centered at origin.
-    const RED = '#c81e2c';
-    const DARKRED = '#96141f';
-    const BLUE = '#123a8f';
-    const NAVY = '#0a2460';
+  function spawnSpore(x, y, vx, vy, life) {
+    const i = sporeHead;
+    sporeHead = (sporeHead + 1) % SPORE_MAX;
+    sporeX[i] = x; sporeY[i] = y;
+    sporeVX[i] = vx; sporeVY[i] = vy;
+    sporeAge[i] = 0; sporeLife[i] = life;
+  }
 
-    function limb(points, color, w0, w1) {
-      g.strokeStyle = color;
-      g.lineWidth = w0;
-      g.lineCap = 'round';
-      g.lineJoin = 'round';
-      g.beginPath();
-      g.moveTo(points[0][0], points[0][1]);
-      for (let i = 1; i < points.length; i++) g.lineTo(points[i][0], points[i][1]);
-      g.stroke();
-      if (w1 > 0) {
-        g.strokeStyle = 'rgba(255,255,255,0.14)';
-        g.lineWidth = Math.max(0.6, w1);
-        g.stroke();
-      }
+  function updateSpores(dt) {
+    for (let i = 0; i < SPORE_MAX; i++) {
+      if (sporeAge[i] >= sporeLife[i]) continue;
+      sporeAge[i] += dt;
+      sporeX[i] += sporeVX[i] * dt;
+      sporeY[i] += sporeVY[i] * dt;
+      sporeVY[i] += 16 * dt;
+      sporeVX[i] *= (1 - 1.4 * dt);
+      sporeVY[i] *= (1 - 1.4 * dt);
     }
+  }
 
-    function gloveFoot(pt, color) {
-      g.fillStyle = color;
+  function drawSpores(g) {
+    g.save();
+    g.fillStyle = '#eaf3ff';
+    for (let i = 0; i < SPORE_MAX; i++) {
+      const l = sporeLife[i];
+      if (!l || sporeAge[i] >= l) continue;
+      const k = sporeAge[i] / l;
+      g.globalAlpha = (1 - k) * 0.7;
+      const r = 0.9 + (1 - k) * 1.3;
       g.beginPath();
-      g.arc(pt[0], pt[1], 1.9, 0, Math.PI * 2);
+      g.arc(sporeX[i], sporeY[i], r, 0, TAU);
       g.fill();
     }
+    g.restore();
+  }
 
-    // Pose data: [armR shoulder->elbow->hand, armL, legR hip->knee->foot, legL]
-    let arms, legs, lean;
-    if (g.__pose === POSE_SWING) {
-      lean = 0.12;
-      arms = [[[1.5, -5.5], [5.2, -9.8], [8.4, -14.6]], [[-1.5, -5.5], [-4.6, -1.5], [-2.8, 3.2]]];
-      legs = [[[1.4, 6.5], [6.2, 9.6], [10.4, 7.2]], [[-1.4, 6.5], [-4.8, 11.8], [-2.6, 16.6]]];
-    } else if (g.__pose === POSE_FLIP_A) {
-      lean = -0.2;
-      arms = [[[1.5, -5.5], [5.8, -3.2], [7.6, 1.4]], [[-1.5, -5.5], [-5.8, -3.2], [-7.6, 1.4]]];
-      legs = [[[1.4, 6.5], [5.4, 8.2], [4.2, 13.4]], [[-1.4, 6.5], [-5.4, 8.2], [-4.2, 13.4]]];
-    } else if (g.__pose === POSE_FLIP_B) {
-      lean = 0;
-      arms = [[[1.5, -5.5], [5.2, -7.6], [6.8, -12.4]], [[-1.5, -5.5], [-5.2, -7.6], [-6.8, -12.4]]];
-      legs = [[[1.4, 6.5], [4.6, 10.8], [1.8, 14.2]], [[-1.4, 6.5], [-4.6, 10.8], [-1.8, 14.2]]];
-    } else {
-      lean = 0.3;
-      arms = [[[1.5, -5.5], [6.4, -10.6], [10.8, -15.2]], [[-1.5, -5.5], [-5.6, -8.4], [-8.8, -12.8]]];
-      legs = [[[1.4, 6.5], [7.8, 10.2], [12.6, 13.8]], [[-1.4, 6.5], [-5.2, 11.4], [-7.8, 16.8]]];
+  // Speed dust streaking past during fast swings (runtime only).
+  const DUST_MAX = isPreview ? 0 : 30;
+  const dustSeed = new Float32Array(Math.max(1, DUST_MAX));
+  for (let i = 0; i < DUST_MAX; i++) dustSeed[i] = Math.random();
+
+  function drawDust(g, w, h, intensity) {
+    if (DUST_MAX === 0 || intensity <= 0.02) return;
+    g.save();
+    g.lineCap = 'round';
+    g.strokeStyle = '#cfe4ff';
+    for (let i = 0; i < DUST_MAX; i++) {
+      const sd = dustSeed[i];
+      const speed = 320 + sd * 480;
+      const x = w - ((time * speed + sd * 4096) % (w + 140));
+      const y = (sd * 0.9 + 0.05) * h;
+      const len = (18 + sd * 34) * intensity;
+      g.globalAlpha = (0.05 + sd * 0.08) * intensity;
+      g.lineWidth = 1 + sd * 1.4;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(x + len, y + (sd - 0.5) * 6);
+      g.stroke();
     }
+    g.restore();
+  }
+
+  // ------------------------------------------------------------------
+  // Hero rig: live articulated skeleton with spring-smoothed joints
+  // ------------------------------------------------------------------
+
+  // Channels: 0 lean, 1 headPitch, 2 shR, 3 shL, 4 elR, 5 elL,
+  //           6 hipR, 7 hipL, 8 knR, 9 knL.
+  // Angles are measured from "down" (+y), opening toward +x, in BODY space.
+  const JOINT_COUNT = 10;
+  const curAng = new Float32Array(JOINT_COUNT);
+  const tgtAng = new Float32Array(JOINT_COUNT);
+  const angVel = new Float32Array(JOINT_COUNT);
+  const JOINT_W = new Float32Array([15, 17, 14, 14, 18, 18, 13, 13, 17, 17]);
+
+  function snapJoints() {
+    for (let j = 0; j < JOINT_COUNT; j++) {
+      curAng[j] = tgtAng[j];
+      angVel[j] = 0;
+    }
+  }
+
+  function stepJoints(dt) {
+    for (let j = 0; j < JOINT_COUNT; j++) {
+      const w = JOINT_W[j];
+      const acc = w * w * shortestAngle(tgtAng[j] - curAng[j]) - 2 * w * angVel[j];
+      angVel[j] += acc * dt;
+      curAng[j] += angVel[j] * dt;
+    }
+  }
+
+  // Pose channels written by the animators each frame (radians).
+  const P = {
+    lean: 0, headPitch: 0,
+    shR: 0, elR: 0, shL: 0, elL: 0,
+    hipR: 0, knR: 0, hipL: 0, knL: 0
+  };
+
+  function copyPoseToTargets() {
+    tgtAng[0] = P.lean; tgtAng[1] = P.headPitch;
+    tgtAng[2] = P.shR; tgtAng[3] = P.shL;
+    tgtAng[4] = P.elR; tgtAng[5] = P.elL;
+    tgtAng[6] = P.hipR; tgtAng[7] = P.hipL;
+    tgtAng[8] = P.knR; tgtAng[9] = P.knL;
+  }
+
+  function setPoseDefaults() {
+    P.lean = 0; P.headPitch = 0;
+    P.shR = 2.5; P.elR = 0.15;
+    P.shL = -2.0; P.elL = 0.6;
+    P.hipR = 0.25; P.knR = 0.3;
+    P.hipL = -0.05; P.knL = 0.15;
+  }
+
+  // -- Swing animator: pose derived continuously from pendulum state -------
+  // Convention: joint angles measured from "down" (+y) opening toward +x in
+  // body space, so ~PI/2 points forward-up along the direction of travel.
+  function animateSwing(th, om, t) {
+    const breathe = Math.sin(t * 2.3);
+    const absOm = Math.min(Math.abs(om), 3);
+
+    P.lean = 0.10 + 0.20 * th + 0.04 * absOm + 0.012 * breathe;
+    P.headPitch = -0.08 + th * 0.12 + 0.02 * breathe;
+
+    // Right arm leads upward toward the anchor line.
+    P.shR = 2.5 + 0.35 * th + 0.06 * breathe;
+    P.elR = 0.14 + 0.10 * Math.abs(th) + 0.04 * breathe;
+
+    // Left arm trails opposite as a balancer, lagging velocity slightly.
+    P.shL = -2.0 + 0.5 * th - 0.12 * om;
+    P.elL = 0.62 - 0.16 * th;
+
+    // Trailing pencil-line legs: near leg softly bent, far leg extended.
+    P.hipR = 0.24 + 0.5 * th - 0.10 * om + 0.05 * breathe;
+    P.knR = 0.30 + 0.22 * Math.abs(th);
+    P.hipL = -0.08 + 0.45 * th - 0.14 * om;
+    P.knL = 0.12 + 0.16 * Math.abs(th);
+  }
+
+  // -- Free-flip animator: tuck mid-rotation, extend before catch ---------
+  function animateFlip(prog, t) {
+    const tuck = prog < 0.5 ? smoothstep(prog * 2) : smoothstep((1 - prog) * 2);
+    const ext = 1 - tuck;
+
+    P.lean = 0;
+    P.headPitch = -0.12 - 0.10 * tuck;
+
+    P.shR = 0.5 + 2.0 * tuck;
+    P.shL = -0.5 - 2.0 * tuck;
+    P.elR = 0.5 + 1.5 * tuck;
+    P.elL = -(0.5 + 1.5 * tuck);
+
+    P.hipR = 0.4 + 1.3 * tuck;
+    P.hipL = -(0.4 + 1.3 * tuck);
+    P.knR = 0.4 + 1.9 * tuck;
+    P.knL = -(0.4 + 1.9 * tuck);
+  }
+
+  // -- Shoot/recoil animator ----------------------------------------------
+  function animateShoot(prog, rel) {
+    const wind = smoothstep(clamp(prog / 0.16, 0, 1));
+    const fire = smoothstep(clamp((prog - 0.14) / 0.30, 0, 1));
+    const load = smoothstep(clamp((prog - 0.5) / 0.5, 0, 1));
+
+    P.lean = 0.14 + fire * 0.06;
+    P.headPitch = -0.06 + (rel - 0.9) * 0.25;
+
+    // Shooting arm cocks behind, then thrusts wrist-first along the aim.
+    P.shR = rel + (1 - fire) * (-0.9 * wind) - fire * 0.06 - load * 0.05;
+    P.elR = lerp(1.1, 0.12, fire) + load * 0.06;
+
+    // Off arm braces across the chest, releases outward as load arrives.
+    P.shL = rel - 1.3 + fire * 0.6 + load * 0.5;
+    P.elL = -(1.3 - fire * 0.4 - load * 0.3);
+
+    // Legs coil on the cock, kick-trail under acceleration.
+    P.hipR = -0.2 + wind * 0.3 - fire * 0.1 + load * 0.25;
+    P.knR = 0.55 + wind * 0.45 - fire * 0.2 + load * 0.25;
+    P.hipL = 0.25 - wind * 0.35 + fire * 0.2 + load * 0.5;
+    P.knL = -(0.35 + wind * 0.3 + load * 0.15);
+  }
+
+  // ------------------------------------------------------------------
+  // Hero rendering (vector skeleton, batched strokes, one pass per frame)
+  // ------------------------------------------------------------------
+
+  const RED = '#c81e2c', RED_DK = '#8c1220';
+  const BLUE = '#123a8f', NAVY = '#0a2460';
+  const INK = 'rgba(18,6,10,0.5)';
+
+  function strokeSeg(g, x0, y0, x1, y1) {
+    g.moveTo(x0, y0);
+    g.lineTo(x1, y1);
+  }
+
+  // Two-bone chain FK in body space. a1 = upper angle from "down" toward +x,
+  // a2 = lower flex relative to upper. Writes into slot `off` of scratch c.
+  const heroC = new Float32Array(24);
+  function chainInto(c, off, bx, by, a1, l1, a2, l2) {
+    const ex = bx + Math.sin(a1) * l1, ey = by + Math.cos(a1) * l1;
+    const a = a1 + a2;
+    c[off] = bx; c[off + 1] = by;
+    c[off + 2] = ex; c[off + 3] = ey;
+    c[off + 4] = bx + Math.sin(a) * l2;
+    c[off + 5] = by + Math.cos(a) * l2;
+  }
+
+  // Bone lengths in unit space (u = pixels per unit).
+  const UP_ARM = 4.0, FORE_ARM = 3.8, THIGH = 4.3, SHIN = 4.2;
+  const TORSO_TOP = -6.2, TORSO_BOT = 0.8, SH_OFF = 1.5, HIP_OFF = 1.3;
+
+  function paintHero(g, u, faceDir, showShooter) {
+    const cosL = Math.cos(curAng[0]), sinL = Math.sin(curAng[0]);
+    function rotX(x, y) { return x * cosL - y * sinL; }
+    function rotY(x, y) { return x * sinL + y * cosL; }
+
+    const shRx = rotX(SH_OFF, TORSO_TOP + 0.9), shRy = rotY(SH_OFF, TORSO_TOP + 0.9);
+    const shLx = rotX(-SH_OFF, TORSO_TOP + 0.9), shLy = rotY(-SH_OFF, TORSO_TOP + 0.9);
+    const hpRx = rotX(HIP_OFF, TORSO_BOT), hpRy = rotY(HIP_OFF, TORSO_BOT);
+    const hpLx = rotX(-HIP_OFF, TORSO_BOT), hpLy = rotY(-HIP_OFF, TORSO_BOT);
+    const neckX = rotX(0, TORSO_TOP), neckY = rotY(0, TORSO_TOP);
+
+    // Shared scratch buffer — no per-frame allocation.
+    const c = heroC;
+    chainInto(c, 0, shRx, shRy, curAng[2], UP_ARM, curAng[4], FORE_ARM);   // armR
+    chainInto(c, 6, shLx, shLy, curAng[3], UP_ARM, curAng[5], FORE_ARM);   // armL
+    chainInto(c, 12, hpRx, hpRy, curAng[6], THIGH, curAng[8], SHIN);       // legR
+    chainInto(c, 18, hpLx, hpLy, curAng[7], THIGH, curAng[9], SHIN);       // legL
 
     g.save();
-    g.rotate(lean);
+    g.rotate(curAng[0]);   // everything below drawn in upright body space
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
 
-    // Far limbs first (darker shade for depth).
-    limb(arms[1], NAVY, 3.1, 0);
-    gloveFoot(arms[1][2], DARKRED);
-    limb(legs[1], NAVY, 3.6, 0);
-    gloveFoot(legs[1][2], NAVY);
+    // --- Far-side limbs (dimmed) ---
+    g.strokeStyle = NAVY;
+    g.lineWidth = 2.8 * u;
+    g.beginPath();
+    strokeSeg(g, c[6], c[7], c[8], c[9]); strokeSeg(g, c[8], c[9], c[10], c[11]);
+    g.stroke();
+    g.lineWidth = 3.3 * u;
+    g.beginPath();
+    strokeSeg(g, c[18], c[19], c[20], c[21]); strokeSeg(g, c[20], c[21], c[22], c[23]);
+    g.stroke();
+    g.fillStyle = NAVY;
+    g.beginPath(); g.arc(c[22], c[23], 1.7 * u, 0, TAU); g.fill();
+    g.fillStyle = RED_DK;
+    g.beginPath(); g.arc(c[10], c[11], 1.55 * u, 0, TAU); g.fill();
 
-    // Torso: blue flanks behind a red front panel.
+    // --- Torso: blue back panel, red front, blue hips ---
     g.fillStyle = BLUE;
-    g.beginPath();
-    g.ellipse(0, 0.4, 4.6, 7.2, 0, 0, Math.PI * 2);
-    g.fill();
+    g.beginPath(); g.ellipse(0, -2.6, 4.5, 6.5, 0, 0, TAU); g.fill();
     g.fillStyle = RED;
-    g.beginPath();
-    g.ellipse(0, -0.6, 3.9, 6.6, 0, 0, Math.PI * 2);
-    g.fill();
+    g.beginPath(); g.ellipse(0.2, -2.9, 3.8, 6.1, 0.02, 0, TAU); g.fill();
+    g.fillStyle = BLUE;
+    g.beginPath(); g.ellipse(0, 1.9, 3.5, 2.3, 0, 0, TAU); g.fill();
 
-    // Black spider emblem.
-    g.fillStyle = '#0a0a0f';
+    // Subtle muscle highlight arcs.
+    g.strokeStyle = 'rgba(255,255,255,0.14)';
+    g.lineWidth = 0.7 * u;
     g.beginPath();
-    g.ellipse(0, -1.6, 1.0, 1.7, 0, 0, Math.PI * 2);
-    g.fill();
-    g.strokeStyle = '#0a0a0f';
-    g.lineWidth = 0.55;
+    g.arc(-1.4, -4.6, 2.1, -0.5, 1.1);
+    g.arc(1.8, -4.6, 2.1, 2.0, 3.7);
+    g.stroke();
+
+    // Collar.
+    g.strokeStyle = RED_DK;
+    g.lineWidth = 1.1 * u;
+    g.beginPath();
+    g.arc(0, TORSO_TOP + 0.5, 1.9, 0.25, Math.PI - 0.25);
+    g.stroke();
+
+    // Spider emblem: abdomen + 8 legs.
+    g.fillStyle = '#0a0a10';
+    g.beginPath(); g.ellipse(0.1, -3.1, 0.95, 1.75, 0, 0, TAU); g.fill();
+    g.strokeStyle = '#0a0a10';
+    g.lineWidth = 0.5 * u;
     for (let s = -1; s <= 1; s += 2) {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 4; i++) {
+        const y0 = -4.3 + i * 0.85;
         g.beginPath();
-        g.moveTo(s * 0.6, -2.4 + i * 0.8);
-        g.quadraticCurveTo(s * 2.6, -3.4 + i * 1.0, s * 3.3, -2.0 + i * 1.15);
+        g.moveTo(0.1 + s * 0.5, y0);
+        g.quadraticCurveTo(0.1 + s * 2.4, y0 - 0.9 + i * 0.25, 0.1 + s * 3.1, y0 + 0.35 + i * 0.1);
         g.stroke();
       }
     }
 
-    // Web-shooter wrist band glint.
-    g.strokeStyle = 'rgba(255,255,255,0.5)';
-    g.lineWidth = 0.7;
-    g.beginPath();
-    g.moveTo(arms[0][1][0] - 0.8, arms[0][1][1] - 0.8);
-    g.lineTo(arms[0][1][0] + 0.6, arms[0][1][1] + 1.0);
-    g.stroke();
-
-    // Near limbs (bright).
-    limb(legs[0], BLUE, 3.8, 1.0);
-    gloveFoot(legs[0][2], BLUE);
-    limb(arms[0], RED, 3.1, 0.9);
-    gloveFoot(arms[0][2], RED);
-
-    // Head + mask.
-    const hx = 0.4, hy = -10.4;
-    g.fillStyle = RED;
-    g.beginPath();
-    g.ellipse(hx, hy, 3.5, 3.9, 0.1, 0, Math.PI * 2);
-    g.fill();
-    // Mask web lines.
-    g.strokeStyle = 'rgba(20, 8, 12, 0.55)';
-    g.lineWidth = 0.4;
-    for (let i = 0; i < 4; i++) {
+    // Suit webbing (chest arcs + radial lines).
+    g.strokeStyle = INK;
+    g.lineWidth = 0.35 * u;
+    for (let ring = 1; ring <= 3; ring++) {
       g.beginPath();
-      g.moveTo(hx, hy - 3.6);
-      g.quadraticCurveTo(hx - 3 + i * 2, hy - 0.5, hx - 3.4 + i * 2.3, hy + 3.4);
+      g.ellipse(0.1, -2.9, 1.15 * ring, 1.9 * ring, 0.02, -Math.PI * 0.92, -Math.PI * 0.08);
       g.stroke();
     }
-    g.beginPath();
-    g.arc(hx, hy, 3.7, -0.4, Math.PI + 0.4);
-    g.stroke();
+    for (let k = -2; k <= 2; k++) {
+      g.beginPath();
+      g.moveTo(0.1 + k * 1.5, -8.3);
+      g.lineTo(0.1 + k * 1.05, -2.5);
+      g.stroke();
+    }
 
-    // Angular white eye lenses with black rims.
+    // --- Near-side limbs (bright, segmented suit colors) ---
+    g.strokeStyle = BLUE;
+    g.lineWidth = 3.7 * u;
+    g.beginPath(); strokeSeg(g, c[12], c[13], c[14], c[15]); g.stroke();
+    g.strokeStyle = RED;
+    g.lineWidth = 3.2 * u;
+    g.beginPath(); strokeSeg(g, c[14], c[15], c[16], c[17]); g.stroke();
+    g.strokeStyle = 'rgba(255,118,128,0.4)';
+    g.lineWidth = 0.9 * u;
+    g.beginPath(); strokeSeg(g, c[14] - 0.6, c[15], c[16] - 0.6, c[17]); g.stroke();
+    g.fillStyle = RED;
+    g.beginPath(); g.arc(c[16], c[17], 1.8 * u, 0, TAU); g.fill();
+
+    g.strokeStyle = RED;
+    g.lineWidth = 3.0 * u;
+    g.beginPath();
+    strokeSeg(g, c[0], c[1], c[2], c[3]); strokeSeg(g, c[2], c[3], c[4], c[5]);
+    g.stroke();
+    g.strokeStyle = 'rgba(255,118,128,0.35)';
+    g.lineWidth = 0.8 * u;
+    g.beginPath(); strokeSeg(g, c[0] - 0.7, c[1], c[2] - 0.7, c[3]); g.stroke();
+    g.fillStyle = RED;
+    g.beginPath(); g.arc(c[4], c[5], 1.65 * u, 0, TAU); g.fill();
+
+    // Web-shooter band at the shooting wrist.
+    if (showShooter) {
+      const wa = Math.atan2(c[5] - c[3], c[4] - c[2]);
+      g.strokeStyle = 'rgba(235,242,255,0.85)';
+      g.lineWidth = 0.9 * u;
+      g.beginPath();
+      g.moveTo(c[4] - Math.sin(wa) * 1.9 * u, c[5] + Math.cos(wa) * 1.9 * u);
+      g.lineTo(c[4] + Math.sin(wa) * 1.9 * u, c[5] - Math.cos(wa) * 1.9 * u);
+      g.stroke();
+    }
+
+    // --- Head (independent pitch channel) ---
+    g.save();
+    g.translate(neckX, neckY - 3.3);
+    g.rotate(curAng[1]);
+    g.fillStyle = RED;
+    g.beginPath(); g.ellipse(0, 0, 3.4, 3.8, 0, 0, TAU); g.fill();
+    g.strokeStyle = INK;
+    g.lineWidth = 0.35 * u;
+    for (let k = -3; k <= 3; k++) {
+      g.beginPath();
+      g.moveTo(0, -3.6);
+      g.quadraticCurveTo(k * 1.15, -0.6, k * 1.5, 3.3);
+      g.stroke();
+    }
+    g.beginPath(); g.arc(0, 0.2, 3.55, -0.35, Math.PI + 0.35); g.stroke();
     for (let s = -1; s <= 1; s += 2) {
-      const ex = hx + s * 1.7, ey = hy - 0.4;
+      const ex = s * 1.55 * faceDir, ey = -0.15;
       g.fillStyle = '#0b0b12';
       g.beginPath();
-      g.moveTo(ex - s * 1.5, ey + 1.1);
-      g.quadraticCurveTo(ex + s * 0.4, ey - 1.6, ex + s * 1.9, ey - 0.9);
-      g.quadraticCurveTo(ex + s * 1.2, ey + 1.3, ex - s * 1.5, ey + 1.1);
-      g.closePath();
-      g.fill();
+      g.moveTo(ex - s * faceDir * 1.5, ey + 1.05);
+      g.quadraticCurveTo(ex + s * faceDir * 0.5, ey - 1.7, ex + s * faceDir * 2.0, ey - 0.8);
+      g.quadraticCurveTo(ex + s * faceDir * 1.2, ey + 1.35, ex - s * faceDir * 1.5, ey + 1.05);
+      g.closePath(); g.fill();
       g.fillStyle = '#f4f9ff';
       g.beginPath();
-      g.moveTo(ex - s * 1.1, ey + 0.75);
-      g.quadraticCurveTo(ex + s * 0.35, ey - 1.15, ex + s * 1.55, ey - 0.6);
-      g.quadraticCurveTo(ex + s * 0.95, ey + 0.9, ex - s * 1.1, ey + 0.75);
-      g.closePath();
-      g.fill();
+      g.moveTo(ex - s * faceDir * 1.1, ey + 0.7);
+      g.quadraticCurveTo(ex + s * faceDir * 0.4, ey - 1.2, ex + s * faceDir * 1.6, ey - 0.5);
+      g.quadraticCurveTo(ex + s * faceDir * 0.95, ey + 0.95, ex - s * faceDir * 1.1, ey + 0.7);
+      g.closePath(); g.fill();
     }
+    g.restore();
 
     g.restore();
-    g.__pose = undefined;
-  }
-
-  function buildHeroPoses() {
-    const sizePx = Math.max(64, Math.round(HERO_UNIT * 5.2));
-    for (let p = 0; p < POSE_COUNT; p++) {
-      let c = heroPoses[p];
-      if (!c) {
-        c = makeCanvas();
-        heroPoses.push(c);
-      }
-      c.width = sizePx;
-      c.height = sizePx;
-      const g = c.getContext('2d');
-      g.setTransform(1, 0, 0, 1, 0, 0);
-      g.clearRect(0, 0, sizePx, sizePx);
-      const u = sizePx / (HERO_UNIT * 5.2);
-      g.setTransform(u, 0, 0, u, sizePx / 2, sizePx / 2);
-      g.__pose = p;
-      paintHeroBody(g);
-    }
-    // Soft rim glow sprite behind the hero.
-    heroGlowSprite = makeCanvas();
-    const gs = isPreview ? 64 : 112;
-    heroGlowSprite.width = gs;
-    heroGlowSprite.height = gs;
-    const gg = heroGlowSprite.getContext('2d');
-    const grad = gg.createRadialGradient(gs / 2, gs / 2, 2, gs / 2, gs / 2, gs / 2);
-    grad.addColorStop(0, 'rgba(200, 226, 255, 0.30)');
-    grad.addColorStop(0.5, 'rgba(135, 206, 250, 0.10)');
-    grad.addColorStop(1, 'rgba(135, 206, 250, 0)');
-    gg.fillStyle = grad;
-    gg.fillRect(0, 0, gs, gs);
   }
 
   // ------------------------------------------------------------------
@@ -4111,6 +4356,9 @@ function createSpiderMan(canvas, isPreview) {
   let flipSpin = 6.8;
   let shootProgress = 0;
   let nextAnchorX = 0, nextAnchorY = 0;
+  let handX = 0, handY = 0;
+  let prevHeroX = 0, prevHeroY = 0;
+  let sporeEmitAcc = 0;
 
   function resetHero(w, h) {
     ropeLength = Math.min(w, h) * 0.46;
@@ -4121,8 +4369,13 @@ function createSpiderMan(canvas, isPreview) {
     heroX = anchorX + Math.sin(theta) * ropeLength;
     heroY = anchorY + Math.cos(theta) * ropeLength;
     state = 'SWING';
+    stateTimer = 0;
     flipAngle = 0;
+    shootProgress = 0;
     worldScrollX = 0;
+    setPoseDefaults();
+    copyPoseToTargets();
+    snapJoints();
   }
 
   return {
@@ -4130,8 +4383,7 @@ function createSpiderMan(canvas, isPreview) {
       width = w;
       height = h;
       buildScene(w, h);
-      if (!webSprite) buildWebSprite();
-      buildHeroPoses();
+      buildGlowSprites();
       resetHero(w, h);
     },
 
@@ -4146,6 +4398,9 @@ function createSpiderMan(canvas, isPreview) {
       const G = 9.8;
       const PUMP = 0.9;     // forward momentum added near the bottom of the arc
       const DRAG = 0.12;
+
+      prevHeroX = heroX;
+      prevHeroY = heroY;
 
       if (state === 'SWING') {
         const Lm = ropeLength * 0.012;
@@ -4211,6 +4466,56 @@ function createSpiderMan(canvas, isPreview) {
       if (heroY > height * 0.92 || heroY < -80 || anchorY > height * 0.6) {
         resetHero(width, height);
       }
+
+      // ---- Animation layer: pose targets from physics state ----
+      setPoseDefaults();
+      if (state === 'SWING') {
+        animateSwing(theta, omega, time);
+      } else if (state === 'FLIP') {
+        animateFlip(clamp(stateTimer / 0.62, 0, 1), time);
+      } else {
+        // Aim direction expressed as a body-space shoulder angle measured
+        // from +x with y-up convention (body carries ~0.18 rad rotation).
+        const rel = Math.atan2(-(nextAnchorY - heroY), nextAnchorX - heroX) - 0.18;
+        animateShoot(shootProgress, rel);
+      }
+      copyPoseToTargets();
+      stepJoints(stepDt);
+
+      // ---- Shooting hand in WORLD space (exact FK of the right arm) ------
+      // Computed every frame so the web strand always meets the wrist, even
+      // mid-spring. Body rotation applied on top of the lean channel.
+      const u = (isPreview ? 0.72 : 1.0) * (Math.min(width || 1, height || 1) / 540) * 1.05;
+      let bodyRotNow;
+      if (state === 'SWING') bodyRotNow = theta * 0.35;
+      else if (state === 'FLIP') bodyRotNow = flipAngle;
+      else bodyRotNow = 0.18;
+      const cb = Math.cos(bodyRotNow), sb = Math.sin(bodyRotNow);
+      const shx = SH_OFF * Math.cos(curAng[0]) - (TORSO_TOP + 0.9) * Math.sin(curAng[0]);
+      const shy = SH_OFF * Math.sin(curAng[0]) + (TORSO_TOP + 0.9) * Math.cos(curAng[0]);
+      const a1 = curAng[2], a2 = curAng[2] + curAng[4];
+      const hx = shx + Math.sin(a1) * UP_ARM + Math.sin(a2) * FORE_ARM;
+      const hy = shy + Math.cos(a1) * UP_ARM + Math.cos(a2) * FORE_ARM;
+      handX = heroX + (hx * cb - hy * sb) * u;
+      handY = heroY + (hx * sb + hy * cb) * u;
+
+      // ---- Silk spores emitted along the live strand ----
+      updateSpores(stepDt);
+      if (state !== 'FLIP') {
+        sporeEmitAcc += stepDt * (isPreview ? 10 : 22);
+        while (sporeEmitAcc >= 1) {
+          sporeEmitAcc -= 1;
+          const t = Math.random();
+          const ex = state === 'SHOOT'
+            ? lerp(handX, nextAnchorX, easeOutCubic(clamp(shootProgress / 0.45, 0, 1)))
+            : lerp(handX, anchorX, t);
+          const ey = state === 'SHOOT'
+            ? lerp(handY, nextAnchorY, easeOutCubic(clamp(shootProgress / 0.45, 0, 1)))
+            : lerp(handY, anchorY, t);
+          spawnSpore(ex + (Math.random() - 0.5) * 6, ey + (Math.random() - 0.5) * 6,
+            (Math.random() - 0.5) * 14, 6 + Math.random() * 16, 0.5 + Math.random() * 0.5);
+        }
+      }
     },
 
     draw(context, w, h) {
@@ -4272,41 +4577,61 @@ function createSpiderMan(canvas, isPreview) {
         context.fillRect(tx - 14, h - 3.5, isPreview ? 7 : 14, 1.4);
       }
 
-      // Web strand.
-      const handX = heroX + (anchorX - heroX) * 0.14;
-      const handY = heroY + (anchorY - heroY) * 0.14;
+      // Speed dust driven by actual hero velocity (runtime only).
+      const hvx = heroX - prevHeroX, hvy = heroY - prevHeroY;
+      const spd = Math.hypot(hvx, hvy) * 60;
+      drawDust(context, w, h, clamp((spd - 120) / 420, 0, 1));
+
+      const u = (isPreview ? 0.72 : 1.0) * (Math.min(w, h) / 540) * 1.05;
+
+      // ---------------- web strand + throw effects ------------------------
       if (state === 'SWING') {
-        drawWebStrand(context, handX, handY, anchorX, anchorY);
+        const tension = clamp((omega * omega) * ropeLength / 900, 0, 1);
+        const sag = lerp(12, 2, tension) * (ropeLength / 240);
+        drawWebStrand(context, handX, handY, anchorX, anchorY, sag, 1, 1, time);
+        drawAnchorSplat(context, anchorX, anchorY, 2.6 * (isPreview ? 0.7 : 1), 0.85);
       } else if (state === 'SHOOT') {
-        const tipX = handX + (nextAnchorX - handX) * shootProgress;
-        const tipY = handY + (nextAnchorY - handY) * shootProgress;
-        drawWebStrand(context, handX, handY, tipX, tipY);
-        context.fillStyle = 'rgba(255, 255, 255, 0.95)';
-        context.beginPath();
-        context.arc(tipX, tipY, 2.4, 0, Math.PI * 2);
-        context.fill();
+        const p = shootProgress;
+        const tipT = easeOutCubic(clamp(p / 0.45, 0, 1));
+        const tipX = lerp(handX, nextAnchorX, tipT);
+        const tipY = lerp(handY, nextAnchorY, tipT);
+        const growAlpha = clamp(p / 0.12, 0, 1);
+        const tighten = smoothstep(clamp((p - 0.45) / 0.55, 0, 1));
+        drawWebStrand(context, handX, handY, tipX, tipY, lerp(10, 1.5, tighten), growAlpha, lerp(0.7, 1.15, tighten), time);
+        if (tipT >= 1) {
+          drawAnchorSplat(context, nextAnchorX, nextAnchorY, 2.6 + 1.6 * tighten, 0.9);
+        }
+        if (p > 0.1 && p < 0.4) {
+          const fa = 1 - Math.abs(p - 0.22) / 0.18;
+          const fs = (isPreview ? 20 : 40) * (0.6 + clamp(fa, 0, 1) * 0.7);
+          context.save();
+          context.globalAlpha = clamp(fa, 0, 1) * 0.8;
+          context.drawImage(flashSprite.canvas, handX - fs / 2, handY - fs / 2, fs, fs);
+          context.restore();
+        }
       }
 
-      // Hero sprite with rim glow.
-      const scaleU = isPreview ? 0.72 : 1.0;
-      const px = HERO_UNIT * 5.2 * scaleU;
-      let rot = 0, pose = POSE_SWING;
-      if (state === 'SWING') {
-        rot = theta * 0.85;
-      } else if (state === 'FLIP') {
-        rot = flipAngle;
-        pose = (Math.floor(flipAngle / Math.PI) % 2 === 0) ? POSE_FLIP_A : POSE_FLIP_B;
-      } else {
-        rot = 0.25;
-        pose = POSE_LUNGE;
-      }
+      drawSpores(context);
+
+      // ---------------- hero: glow underlay + live skeleton ---------------
+      const heroPx = 15 * 4.6 * u;
       context.save();
       context.translate(heroX, heroY);
+      context.globalAlpha = 0.85;
+      context.drawImage(warmGlowSprite.canvas, -heroPx * 0.7, -heroPx * 0.5, heroPx * 1.4, heroPx * 1.4);
       context.globalAlpha = 0.9;
-      context.drawImage(heroGlowSprite, -px * 0.62, -px * 0.62, px * 1.24, px * 1.24);
+      context.drawImage(rimGlowSprite.canvas, -heroPx * 0.62, -heroPx * 0.62, heroPx * 1.24, heroPx * 1.24);
       context.globalAlpha = 1;
-      context.rotate(rot);
-      context.drawImage(heroPoses[pose], -px / 2, -px / 2, px, px);
+
+      // Body orientation must match the bodyRotNow used for the hand FK in
+      // update() so the strand stays welded to the wrist.
+      let bodyRot;
+      if (state === 'SWING') bodyRot = theta * 0.35;
+      else if (state === 'FLIP') bodyRot = flipAngle;
+      else bodyRot = 0.18;
+      context.rotate(bodyRot);
+
+      paintHero(context, u, 1, state !== 'FLIP');
       context.restore();
 
       // Runtime subtitle.
@@ -4324,9 +4649,9 @@ function createSpiderMan(canvas, isPreview) {
       layerCanvases.length = 0;
       layerStripW.length = 0;
       layerBeacons.length = 0;
-      heroPoses.length = 0;
-      heroGlowSprite = null;
-      webSprite = null;
+      rimGlowSprite.canvas = null;
+      warmGlowSprite.canvas = null;
+      flashSprite.canvas = null;
     }
   };
 }
