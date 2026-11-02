@@ -3611,386 +3611,705 @@ function drawChromatidV(ctx, x, y, size, dir) {
 }
 
 /**
- * 23. SPIDER-MAN (CINEMATIC WORLDS)
- * Cinematic web-swinging through dark Manhattan skyscraper canyons
- * with pendulum kinematics, acrobatic tuck-flips, dynamic web line firing,
- * and parallax night cityscape.
+ * 23. SPIDER-MAN (CINEMATIC WORLDS) — POLISHED REBUILD
+ * A cinematic night-sky web swing across a procedurally lit Manhattan canyon:
+ * pendulum physics with energy pumping, acrobatic release flips, web-line
+ * firing with recoil pose, and three parallax skylines whose lit windows are
+ * baked once into cached strip canvases.
+ *
+ * Low-RAM architecture: the skyline layers, moon halo, starfield, web strand
+ * sprite and hero glow are pre-rendered offscreen at resize; per-frame work is
+ * two blits per layer plus one transformed hero sprite. The hero figure is a
+ * vector drawing baked into four pose atlases (swing, tuck-flip x2, landing
+ * lunge) so no path work happens during animation frames. Reduced-motion and
+ * hover feedback scale the simulation clock, never the geometry.
  */
 function createSpiderMan(canvas, isPreview) {
   let width = 0;
   let height = 0;
   let time = 0;
 
-  // Cityscape building generation
-  const buildingsLayer1 = [];
-  const buildingsLayer2 = [];
-  const buildingsLayer3 = [];
+  // Deterministic PRNG so skylines/windows survive resizes identically.
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
 
-  function generateBuildings(w, h) {
-    buildingsLayer1.length = 0;
-    buildingsLayer2.length = 0;
-    buildingsLayer3.length = 0;
+  // ------------------------------------------------------------------
+  // Cached scenery layers (rebuilt only on resize)
+  // ------------------------------------------------------------------
 
-    let x = -50;
-    while (x < w + 200) {
-      const bw = 50 + Math.random() * 60;
-      const bh = h * (0.45 + Math.random() * 0.35);
-      buildingsLayer1.push({ x, w: bw, h: bh, winCols: Math.floor(bw / 14), winRows: Math.floor(bh / 20) });
-      x += bw + (Math.random() * 10);
+  const LAYER_DEFS = [
+    // dist, speed, body color, width range, height range, window chance, win alpha
+    { dist: 0.20, speed: 0.16, body: '#070b15', wMin: 46, wMax: 84, hMin: 0.40, hMax: 0.30, winChance: 0.10, winAlpha: 0.16, crown: false },
+    { dist: 0.55, speed: 0.42, body: '#0a101f', wMin: 60, wMax: 104, hMin: 0.46, hMax: 0.36, winChance: 0.16, winAlpha: 0.24, crown: true },
+    { dist: 0.90, speed: 0.85, body: '#0e1626', wMin: 92, wMax: 150, hMin: 0.55, hMax: 0.36, winChance: 0.22, winAlpha: 0.34, crown: true }
+  ];
+
+  let skyCanvas = null, skyCtx = null;
+  const layerCanvases = [];
+  const layerStripW = [];
+  let layerTileCount = 0;
+  let worldScrollX = 0;
+  let sceneDirty = true;
+
+  function makeCanvas() {
+    return document.createElement('canvas');
+  }
+
+  function buildSky(w, h) {
+    if (!skyCanvas) {
+      skyCanvas = makeCanvas();
+      skyCtx = skyCanvas.getContext('2d');
+    }
+    skyCanvas.width = Math.max(1, Math.round(w));
+    skyCanvas.height = Math.max(1, Math.round(h));
+    const g = skyCtx;
+
+    const grad = g.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, '#010207');
+    grad.addColorStop(0.55, '#040814');
+    grad.addColorStop(0.85, '#081020');
+    grad.addColorStop(1, '#0c1526');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+
+    // Faint stars, upper half only (city glow swallows the horizon).
+    const rnd = mulberry32(24601);
+    const starCount = isPreview ? 40 : 90;
+    for (let i = 0; i < starCount; i++) {
+      const sx = rnd() * w;
+      const sy = rnd() * h * 0.5;
+      const sr = 0.4 + rnd() * 0.9;
+      g.fillStyle = `rgba(220, 235, 255, ${0.12 + rnd() * 0.3})`;
+      g.beginPath();
+      g.arc(sx, sy, sr, 0, Math.PI * 2);
+      g.fill();
     }
 
-    x = -50;
-    while (x < w + 200) {
-      const bw = 65 + Math.random() * 75;
-      const bh = h * (0.35 + Math.random() * 0.45);
-      buildingsLayer2.push({
-        x,
-        w: bw,
-        h: bh,
-        hasCrown: Math.random() > 0.4,
-        hasAntenna: Math.random() > 0.5,
-        winCols: Math.floor(bw / 16),
-        winRows: Math.floor(bh / 22)
-      });
-      x += bw + (Math.random() * 15);
+    // Full moon with layered cool halo.
+    const mx = w * 0.8;
+    const my = h * 0.18;
+    const mr = isPreview ? 13 : 22;
+    const halo = g.createRadialGradient(mx, my, mr * 0.6, mx, my, mr * 4.2);
+    halo.addColorStop(0, 'rgba(210, 232, 255, 0.34)');
+    halo.addColorStop(0.4, 'rgba(135, 206, 250, 0.10)');
+    halo.addColorStop(1, 'rgba(135, 206, 250, 0)');
+    g.fillStyle = halo;
+    g.beginPath();
+    g.arc(mx, my, mr * 4.2, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = '#eef4fb';
+    g.beginPath();
+    g.arc(mx, my, mr, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = 'rgba(150, 170, 195, 0.35)';
+    g.beginPath();
+    g.arc(mx - mr * 0.3, my - mr * 0.2, mr * 0.22, 0, Math.PI * 2);
+    g.arc(mx + mr * 0.25, my + mr * 0.3, mr * 0.16, 0, Math.PI * 2);
+    g.arc(mx + mr * 0.1, my - mr * 0.45, mr * 0.12, 0, Math.PI * 2);
+    g.fill();
+
+    // Warm city haze rising from the street line.
+    const haze = g.createLinearGradient(0, h * 0.72, 0, h);
+    haze.addColorStop(0, 'rgba(255, 196, 120, 0)');
+    haze.addColorStop(1, 'rgba(255, 186, 110, 0.10)');
+    g.fillStyle = haze;
+    g.fillRect(0, h * 0.72, w, h * 0.28);
+  }
+
+  // Beacon positions are collected while baking each layer so the live blink
+  // dots sit exactly on real antenna tips (tiny Float32 arrays, no objects).
+  const layerBeacons = [];
+
+  function buildLayer(def, w, h) {
+    const rnd = mulberry32(Math.round(1000 + def.dist * 7717));
+    const stripW = Math.max(600, Math.ceil(w / def.dist) + 240);
+    let c = layerCanvases[layerTileCount];
+    if (!c) {
+      c = makeCanvas();
+      layerCanvases.push(c);
+    }
+    c.width = Math.max(1, Math.round(stripW));
+    c.height = Math.max(1, Math.round(h));
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, stripW, h);
+
+    const cell = Math.max(6, Math.round(isPreview ? 7 : 9));
+    const winW = Math.max(2, Math.round(cell * 0.55));
+    const winH = Math.max(3, Math.round(cell * 0.9));
+    const beacons = [];
+
+    // Pass 1: building bodies with crowns, antennas and rooftop tanks.
+    let x = -20;
+    while (x < stripW + 20) {
+      const bw = def.wMin + rnd() * (def.wMax - def.wMin);
+      const bh = h * (def.hMin + rnd() * def.hMax);
+      const by = h - bh;
+      g.fillStyle = def.body;
+      g.fillRect(x, by, bw, bh);
+
+      if (def.crown && rnd() > 0.55) {
+        g.beginPath();
+        g.moveTo(x + bw * 0.18, by);
+        g.lineTo(x + bw * 0.5, by - 10 - rnd() * 14);
+        g.lineTo(x + bw * 0.82, by);
+        g.closePath();
+        g.fill();
+      } else if (rnd() > 0.72) {
+        const ah = 16 + rnd() * 18;
+        g.fillRect(x + bw * 0.5 - 1, by - ah, 2, ah);
+        beacons.push(x + bw * 0.5, by - ah);
+      }
+      // Rooftop water tank silhouette for texture.
+      if (bw > 80 && rnd() > 0.6) {
+        const tw = 12 + rnd() * 10;
+        const tx = x + bw * (0.2 + rnd() * 0.5);
+        g.fillRect(tx, by - tw * 0.9 - 4, tw, tw * 0.9);
+        g.fillRect(tx + tw * 0.2, by - 4, 2, 4);
+      }
+      x += bw + 4 + rnd() * 18;
     }
 
-    x = -50;
-    while (x < w + 300) {
-      const bw = 80 + Math.random() * 100;
-      const bh = h * (0.55 + Math.random() * 0.35);
-      buildingsLayer3.push({ x, w: bw, h: bh, winCols: Math.floor(bw / 20), winRows: Math.floor(bh / 26) });
-      x += bw + 30 + (Math.random() * 40);
+    // Pass 2: lit windows (two warm tones), deterministic per building slot.
+    x = -20;
+    while (x < stripW + 20) {
+      const bw = def.wMin + rnd() * (def.wMax - def.wMin);
+      const bh = h * (def.hMin + rnd() * def.hMax);
+      const by = h - bh;
+      const cols = Math.floor((bw - 8) / cell);
+      const rows = Math.floor((bh - 14) / (cell + 3));
+      for (let r = 0; r < rows; r++) {
+        for (let cx = 0; cx < cols; cx++) {
+          const roll = rnd();
+          if (roll < def.winChance) {
+            g.fillStyle = `rgba(255, 214, 140, ${def.winAlpha + rnd() * 0.2})`;
+            g.fillRect(x + 5 + cx * cell, by + 8 + r * (cell + 3), winW, winH);
+          } else if (roll < def.winChance * 1.35) {
+            g.fillStyle = `rgba(135, 206, 250, ${def.winAlpha * 0.5})`;
+            g.fillRect(x + 5 + cx * cell, by + 8 + r * (cell + 3), winW, winH);
+          }
+        }
+      }
+      x += bw + 4 + rnd() * 18;
+    }
+
+    layerStripW.push(stripW);
+    layerBeacons.push(Float32Array.from(beacons));
+    layerTileCount++;
+  }
+
+  function buildScene(w, h) {
+    buildSky(w, h);
+    layerCanvases.length = 0;
+    layerStripW.length = 0;
+    layerBeacons.length = 0;
+    layerTileCount = 0;
+    for (const def of LAYER_DEFS) buildLayer(def, w, h);
+    sceneDirty = false;
+  }
+
+  function drawScrolledLayer(g, idx, w, h) {
+    const def = LAYER_DEFS[idx];
+    const c = layerCanvases[idx];
+    const stripW = layerStripW[idx];
+    if (!c || !stripW) return;
+    let off = (worldScrollX * def.speed) % stripW;
+    if (off < 0) off += stripW;
+    const firstX = -off;
+    g.drawImage(c, firstX, 0);
+    const tiles = Math.ceil((w - firstX) / stripW);
+    for (let t = 1; t < tiles; t++) {
+      g.drawImage(c, firstX + t * stripW, 0);
     }
   }
 
-  // Pendulum swing state
-  let anchor = { x: 0, y: 0 };
-  let nextAnchor = { x: 0, y: 0 };
+  // ------------------------------------------------------------------
+  // Web strand sprite: baked taper + subtle braided cross-hatch
+  // ------------------------------------------------------------------
+
+  let webSprite = null;
+  const WEB_SPRITE_LEN = 192;
+
+  function buildWebSprite() {
+    webSprite = makeCanvas();
+    webSprite.width = WEB_SPRITE_LEN;
+    webSprite.height = 12;
+    const g = webSprite.getContext('2d');
+    g.clearRect(0, 0, WEB_SPRITE_LEN, 12);
+    g.lineCap = 'round';
+    // Core strand, tapered toward the shooter's hand.
+    g.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    g.lineWidth = 1.6;
+    g.beginPath();
+    g.moveTo(1, 6);
+    g.lineTo(WEB_SPRITE_LEN - 24, 6);
+    g.stroke();
+    g.strokeStyle = 'rgba(210, 235, 255, 0.45)';
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(WEB_SPRITE_LEN - 24, 6);
+    g.lineTo(WEB_SPRITE_LEN - 2, 6);
+    g.stroke();
+    // Braided highlight ticks.
+    g.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+    g.lineWidth = 0.8;
+    for (let x = 10; x < WEB_SPRITE_LEN - 16; x += 14) {
+      g.beginPath();
+      g.moveTo(x, 3.4);
+      g.lineTo(x + 6, 8.6);
+      g.stroke();
+    }
+    // Anchor rosette at the far end.
+    g.fillStyle = 'rgba(255, 255, 255, 0.75)';
+    g.beginPath();
+    g.arc(WEB_SPRITE_LEN - 3, 6, 2.2, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    for (let a = 0; a < 6; a++) {
+      const ang = (a / 6) * Math.PI * 2;
+      g.beginPath();
+      g.moveTo(WEB_SPRITE_LEN - 3, 6);
+      g.lineTo(WEB_SPRITE_LEN - 3 + Math.cos(ang) * 5, 6 + Math.sin(ang) * 5);
+      g.stroke();
+    }
+  }
+
+  function drawWebStrand(g, ax, ay, bx, by) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len = Math.hypot(dx, dy);
+    if (len < 2) return;
+
+    // Gentle catenary sag perpendicular to the strand under load.
+    const sag = Math.min(14, len * 0.05);
+    const midY = (ay + by) / 2 + sag;
+
+    g.save();
+    g.globalAlpha = 0.95;
+    for (let s = 0; s <= 8; s++) {
+      const t = s / 8;
+      const mt = 1 - t;
+      // Quadratic bezier point (anchor -> control below midpoint -> hand).
+      const px = mt * mt * ax + 2 * mt * t * ((ax + bx) / 2) + t * t * bx;
+      const py = mt * mt * ay + 2 * mt * t * midY + t * t * by;
+      if (s < 8) {
+        const t2 = (s + 1) / 8;
+        const mt2 = 1 - t2;
+        const qx = mt2 * mt2 * ax + 2 * mt2 * t2 * ((ax + bx) / 2) + t2 * t2 * bx;
+        const qy = mt2 * mt2 * ay + 2 * mt2 * t2 * midY + t2 * t2 * by;
+        const segLen = Math.hypot(qx - px, qy - py);
+        g.save();
+        g.translate(px, py);
+        g.rotate(Math.atan2(qy - py, qx - px));
+        g.drawImage(webSprite, 0, -6, segLen + 1.5, 12);
+        g.restore();
+      }
+    }
+    g.restore();
+  }
+
+  // ------------------------------------------------------------------
+  // Hero figure: drawn once per pose into baked atlases
+  // ------------------------------------------------------------------
+
+  const HERO_UNIT = 15;              // torso half-height in unit space
+  const POSE_SWING = 0, POSE_FLIP_A = 1, POSE_FLIP_B = 2, POSE_LUNGE = 3;
+  const POSE_COUNT = 4;
+  const heroPoses = [];
+  let heroGlowSprite = null;
+
+  function paintHeroBody(g) {
+    // All coordinates in unit space; torso centered at origin.
+    const RED = '#c81e2c';
+    const DARKRED = '#96141f';
+    const BLUE = '#123a8f';
+    const NAVY = '#0a2460';
+
+    function limb(points, color, w0, w1) {
+      g.strokeStyle = color;
+      g.lineWidth = w0;
+      g.lineCap = 'round';
+      g.lineJoin = 'round';
+      g.beginPath();
+      g.moveTo(points[0][0], points[0][1]);
+      for (let i = 1; i < points.length; i++) g.lineTo(points[i][0], points[i][1]);
+      g.stroke();
+      if (w1 > 0) {
+        g.strokeStyle = 'rgba(255,255,255,0.14)';
+        g.lineWidth = Math.max(0.6, w1);
+        g.stroke();
+      }
+    }
+
+    function gloveFoot(pt, color) {
+      g.fillStyle = color;
+      g.beginPath();
+      g.arc(pt[0], pt[1], 1.9, 0, Math.PI * 2);
+      g.fill();
+    }
+
+    // Pose data: [armR shoulder->elbow->hand, armL, legR hip->knee->foot, legL]
+    let arms, legs, lean;
+    if (g.__pose === POSE_SWING) {
+      lean = 0.12;
+      arms = [[[1.5, -5.5], [5.2, -9.8], [8.4, -14.6]], [[-1.5, -5.5], [-4.6, -1.5], [-2.8, 3.2]]];
+      legs = [[[1.4, 6.5], [6.2, 9.6], [10.4, 7.2]], [[-1.4, 6.5], [-4.8, 11.8], [-2.6, 16.6]]];
+    } else if (g.__pose === POSE_FLIP_A) {
+      lean = -0.2;
+      arms = [[[1.5, -5.5], [5.8, -3.2], [7.6, 1.4]], [[-1.5, -5.5], [-5.8, -3.2], [-7.6, 1.4]]];
+      legs = [[[1.4, 6.5], [5.4, 8.2], [4.2, 13.4]], [[-1.4, 6.5], [-5.4, 8.2], [-4.2, 13.4]]];
+    } else if (g.__pose === POSE_FLIP_B) {
+      lean = 0;
+      arms = [[[1.5, -5.5], [5.2, -7.6], [6.8, -12.4]], [[-1.5, -5.5], [-5.2, -7.6], [-6.8, -12.4]]];
+      legs = [[[1.4, 6.5], [4.6, 10.8], [1.8, 14.2]], [[-1.4, 6.5], [-4.6, 10.8], [-1.8, 14.2]]];
+    } else {
+      lean = 0.3;
+      arms = [[[1.5, -5.5], [6.4, -10.6], [10.8, -15.2]], [[-1.5, -5.5], [-5.6, -8.4], [-8.8, -12.8]]];
+      legs = [[[1.4, 6.5], [7.8, 10.2], [12.6, 13.8]], [[-1.4, 6.5], [-5.2, 11.4], [-7.8, 16.8]]];
+    }
+
+    g.save();
+    g.rotate(lean);
+
+    // Far limbs first (darker shade for depth).
+    limb(arms[1], NAVY, 3.1, 0);
+    gloveFoot(arms[1][2], DARKRED);
+    limb(legs[1], NAVY, 3.6, 0);
+    gloveFoot(legs[1][2], NAVY);
+
+    // Torso: blue flanks behind a red front panel.
+    g.fillStyle = BLUE;
+    g.beginPath();
+    g.ellipse(0, 0.4, 4.6, 7.2, 0, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = RED;
+    g.beginPath();
+    g.ellipse(0, -0.6, 3.9, 6.6, 0, 0, Math.PI * 2);
+    g.fill();
+
+    // Black spider emblem.
+    g.fillStyle = '#0a0a0f';
+    g.beginPath();
+    g.ellipse(0, -1.6, 1.0, 1.7, 0, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = '#0a0a0f';
+    g.lineWidth = 0.55;
+    for (let s = -1; s <= 1; s += 2) {
+      for (let i = 0; i < 3; i++) {
+        g.beginPath();
+        g.moveTo(s * 0.6, -2.4 + i * 0.8);
+        g.quadraticCurveTo(s * 2.6, -3.4 + i * 1.0, s * 3.3, -2.0 + i * 1.15);
+        g.stroke();
+      }
+    }
+
+    // Web-shooter wrist band glint.
+    g.strokeStyle = 'rgba(255,255,255,0.5)';
+    g.lineWidth = 0.7;
+    g.beginPath();
+    g.moveTo(arms[0][1][0] - 0.8, arms[0][1][1] - 0.8);
+    g.lineTo(arms[0][1][0] + 0.6, arms[0][1][1] + 1.0);
+    g.stroke();
+
+    // Near limbs (bright).
+    limb(legs[0], BLUE, 3.8, 1.0);
+    gloveFoot(legs[0][2], BLUE);
+    limb(arms[0], RED, 3.1, 0.9);
+    gloveFoot(arms[0][2], RED);
+
+    // Head + mask.
+    const hx = 0.4, hy = -10.4;
+    g.fillStyle = RED;
+    g.beginPath();
+    g.ellipse(hx, hy, 3.5, 3.9, 0.1, 0, Math.PI * 2);
+    g.fill();
+    // Mask web lines.
+    g.strokeStyle = 'rgba(20, 8, 12, 0.55)';
+    g.lineWidth = 0.4;
+    for (let i = 0; i < 4; i++) {
+      g.beginPath();
+      g.moveTo(hx, hy - 3.6);
+      g.quadraticCurveTo(hx - 3 + i * 2, hy - 0.5, hx - 3.4 + i * 2.3, hy + 3.4);
+      g.stroke();
+    }
+    g.beginPath();
+    g.arc(hx, hy, 3.7, -0.4, Math.PI + 0.4);
+    g.stroke();
+
+    // Angular white eye lenses with black rims.
+    for (let s = -1; s <= 1; s += 2) {
+      const ex = hx + s * 1.7, ey = hy - 0.4;
+      g.fillStyle = '#0b0b12';
+      g.beginPath();
+      g.moveTo(ex - s * 1.5, ey + 1.1);
+      g.quadraticCurveTo(ex + s * 0.4, ey - 1.6, ex + s * 1.9, ey - 0.9);
+      g.quadraticCurveTo(ex + s * 1.2, ey + 1.3, ex - s * 1.5, ey + 1.1);
+      g.closePath();
+      g.fill();
+      g.fillStyle = '#f4f9ff';
+      g.beginPath();
+      g.moveTo(ex - s * 1.1, ey + 0.75);
+      g.quadraticCurveTo(ex + s * 0.35, ey - 1.15, ex + s * 1.55, ey - 0.6);
+      g.quadraticCurveTo(ex + s * 0.95, ey + 0.9, ex - s * 1.1, ey + 0.75);
+      g.closePath();
+      g.fill();
+    }
+
+    g.restore();
+    g.__pose = undefined;
+  }
+
+  function buildHeroPoses() {
+    const sizePx = Math.max(64, Math.round(HERO_UNIT * 5.2));
+    for (let p = 0; p < POSE_COUNT; p++) {
+      let c = heroPoses[p];
+      if (!c) {
+        c = makeCanvas();
+        heroPoses.push(c);
+      }
+      c.width = sizePx;
+      c.height = sizePx;
+      const g = c.getContext('2d');
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.clearRect(0, 0, sizePx, sizePx);
+      const u = sizePx / (HERO_UNIT * 5.2);
+      g.setTransform(u, 0, 0, u, sizePx / 2, sizePx / 2);
+      g.__pose = p;
+      paintHeroBody(g);
+    }
+    // Soft rim glow sprite behind the hero.
+    heroGlowSprite = makeCanvas();
+    const gs = isPreview ? 64 : 112;
+    heroGlowSprite.width = gs;
+    heroGlowSprite.height = gs;
+    const gg = heroGlowSprite.getContext('2d');
+    const grad = gg.createRadialGradient(gs / 2, gs / 2, 2, gs / 2, gs / 2, gs / 2);
+    grad.addColorStop(0, 'rgba(200, 226, 255, 0.30)');
+    grad.addColorStop(0.5, 'rgba(135, 206, 250, 0.10)');
+    grad.addColorStop(1, 'rgba(135, 206, 250, 0)');
+    gg.fillStyle = grad;
+    gg.fillRect(0, 0, gs, gs);
+  }
+
+  // ------------------------------------------------------------------
+  // Pendulum simulation state
+  // ------------------------------------------------------------------
+
+  let anchorX = 0, anchorY = 0;
   let ropeLength = 150;
-  let theta = -0.7; // angle from downward vertical in radians
-  let omega = 0.0;  // angular velocity
-  let heroX = 0;
-  let heroY = 0;
-  let state = 'SWING'; // 'SWING' | 'FLIP' | 'SHOOT'
+  let theta = -0.7, omega = 0;
+  let heroX = 0, heroY = 0;
+  let velX = 0, velY = 0;
+  let state = 'SWING';               // SWING | FLIP | SHOOT
   let stateTimer = 0;
   let flipAngle = 0;
-  let webShootProgress = 0;
-  let worldScrollX = 0;
+  let flipSpin = 6.8;
+  let shootProgress = 0;
+  let nextAnchorX = 0, nextAnchorY = 0;
 
   function resetHero(w, h) {
-    ropeLength = Math.min(w, h) * 0.48;
-    anchor.x = w * 0.45;
-    anchor.y = h * 0.15;
-    theta = -0.75;
-    omega = 1.6;
-    heroX = anchor.x + Math.sin(theta) * ropeLength;
-    heroY = anchor.y + Math.cos(theta) * ropeLength;
+    ropeLength = Math.min(w, h) * 0.46;
+    anchorX = w * 0.42;
+    anchorY = h * 0.14;
+    theta = -0.8;
+    omega = 1.4;
+    heroX = anchorX + Math.sin(theta) * ropeLength;
+    heroY = anchorY + Math.cos(theta) * ropeLength;
     state = 'SWING';
     flipAngle = 0;
+    worldScrollX = 0;
   }
 
   return {
     resize(w, h) {
       width = w;
       height = h;
-      generateBuildings(w, h);
+      buildScene(w, h);
+      if (!webSprite) buildWebSprite();
+      buildHeroPoses();
       resetHero(w, h);
     },
+
     update(dt, isHovered) {
       const motionScale = prefersReducedMotion ? 0.35 : 1.0;
       const speedMult = (isHovered && !prefersReducedMotion ? 1.35 : 1.0) * motionScale;
       const stepDt = Math.min(dt, 0.08) * speedMult;
       time += stepDt;
 
-      // World scroll creates continuous forward sweep through city
-      worldScrollX += (isPreview ? 40 : 65) * stepDt;
+      worldScrollX += (isPreview ? 42 : 68) * stepDt;
 
-      const g = 14.0; // gravity acceleration
-      const d = 0.02; // aerodynamic drag
+      const G = 9.8;
+      const PUMP = 0.9;     // forward momentum added near the bottom of the arc
+      const DRAG = 0.12;
 
       if (state === 'SWING') {
-        const alpha = (-g / (ropeLength * 0.015)) * Math.sin(theta) - d * omega;
+        const Lm = ropeLength * 0.012;
+        const alpha = (-G / Lm) * Math.sin(theta) - DRAG * omega;
         omega += alpha * stepDt;
+        if (theta < 0.12 && theta > -0.45 && omega > 0) omega += PUMP * stepDt;
         theta += omega * stepDt;
 
-        heroX = anchor.x + Math.sin(theta) * ropeLength;
-        heroY = anchor.y + Math.cos(theta) * ropeLength;
+        heroX = anchorX + Math.sin(theta) * ropeLength;
+        heroY = anchorY + Math.cos(theta) * ropeLength;
 
-        // Apex release trigger: reached high swing point moving forward
-        if (theta > 0.65 && omega > 0) {
+        // Release at the forward apex.
+        if (theta > 0.62 && omega > 0.4) {
           state = 'FLIP';
           stateTimer = 0;
           flipAngle = 0;
+          const vx = omega * ropeLength * Math.cos(theta) * 0.012;
+          const vy = -omega * ropeLength * Math.sin(theta) * 0.012;
+          velX = vx * 1.05 + 6;
+          velY = Math.min(vy, 1.5);
+          flipSpin = 6.2 + Math.random() * 1.6;
         }
       } else if (state === 'FLIP') {
         stateTimer += stepDt;
-        heroX += 110 * stepDt;
-        heroY += (-50 + stateTimer * 120) * stepDt;
-        flipAngle += stepDt * 7.5;
-
-        if (stateTimer > 0.45) {
+        velY += 9.8 * stepDt * 0.55;
+        heroX += velX * ropeLength * stepDt * 0.012;
+        heroY += velY * ropeLength * stepDt * 0.012;
+        flipAngle += flipSpin * stepDt;
+        if (stateTimer > 0.5) {
           state = 'SHOOT';
           stateTimer = 0;
-          webShootProgress = 0;
-          nextAnchor.x = heroX + width * 0.42;
-          nextAnchor.y = height * (0.12 + Math.random() * 0.14);
+          shootProgress = 0;
+          nextAnchorX = heroX + width * (0.34 + Math.random() * 0.12);
+          nextAnchorY = height * (0.10 + Math.random() * 0.16);
+          if (nextAnchorY > heroY - 40) nextAnchorY = heroY - height * 0.3;
         }
-      } else if (state === 'SHOOT') {
-        webShootProgress = Math.min(1.0, webShootProgress + stepDt * 4.5);
-        heroX += 80 * stepDt;
-        heroY += 45 * stepDt;
-
-        if (webShootProgress >= 1.0) {
-          anchor.x = nextAnchor.x;
-          anchor.y = nextAnchor.y;
-          const dx = heroX - anchor.x;
-          const dy = heroY - anchor.y;
-          ropeLength = Math.hypot(dx, dy);
+      } else {
+        shootProgress = Math.min(1, shootProgress + stepDt * 5.2);
+        heroX += 60 * stepDt;
+        heroY += 30 * stepDt;
+        if (shootProgress >= 1) {
+          anchorX = nextAnchorX;
+          anchorY = nextAnchorY;
+          const dx = heroX - anchorX;
+          const dy = heroY - anchorY;
+          ropeLength = Math.max(60, Math.hypot(dx, dy));
           theta = Math.atan2(dx, dy);
-          omega = 1.8;
+          omega = 1.55;
           state = 'SWING';
           flipAngle = 0;
         }
       }
 
-      // Keep hero generally framed in viewport
-      if (heroX > width * 0.75) {
-        const shift = heroX - width * 0.75;
-        anchor.x -= shift;
-        nextAnchor.x -= shift;
+      // Camera follows: shift the world back when the hero outruns the frame.
+      const limit = width * 0.72;
+      if (heroX > limit) {
+        const shift = heroX - limit;
+        anchorX -= shift;
+        nextAnchorX -= shift;
         heroX -= shift;
+        worldScrollX += shift * 1.4;
       }
-      if (heroY > height * 0.88 || heroY < -50) {
+      if (heroY > height * 0.92 || heroY < -80 || anchorY > height * 0.6) {
         resetHero(width, height);
       }
     },
+
     draw(context, w, h) {
-      // Midnight sky background
-      const skyGrad = context.createLinearGradient(0, 0, 0, h);
-      skyGrad.addColorStop(0, '#02040a');
-      skyGrad.addColorStop(0.65, '#050a16');
-      skyGrad.addColorStop(1, '#090e1f');
-      context.fillStyle = skyGrad;
-      context.fillRect(0, 0, w, h);
+      if (sceneDirty) buildScene(w, h);
 
-      // Distant full moon with soft glow
-      const moonX = w * 0.78;
-      const moonY = h * 0.22;
-      const moonR = isPreview ? 14 : 24;
-      const moonHalo = context.createRadialGradient(moonX, moonY, moonR * 0.5, moonX, moonY, moonR * 2.8);
-      moonHalo.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
-      moonHalo.addColorStop(0.35, 'rgba(135, 206, 250, 0.4)');
-      moonHalo.addColorStop(1, 'rgba(135, 206, 250, 0)');
-      context.fillStyle = moonHalo;
-      context.beginPath();
-      context.arc(moonX, moonY, moonR * 2.8, 0, Math.PI * 2);
-      context.fill();
+      context.drawImage(skyCanvas, 0, 0, w, h);
 
-      // Draw Parallax Buildings Layer 1 (Distant)
-      context.fillStyle = '#060a14';
-      for (let b of buildingsLayer1) {
-        const bx = ((b.x - worldScrollX * 0.2) % (w + 200)) - 50;
-        context.fillRect(bx, h - b.h, b.w, b.h);
+      drawScrolledLayer(context, 0, w, h);
+
+      // Batline cameo: tiny distant silhouette crossing the moon face.
+      const mnx = w * 0.8, mny = h * 0.18, mnr = isPreview ? 13 : 22;
+      const cameo = ((time * 0.045) % 1);
+      if (cameo > 0.18 && cameo < 0.34) {
+        const cxp = mnx - mnr * 1.6 + (cameo - 0.18) * mnr * 12;
+        const cyp = mny - mnr * 0.4 + Math.sin(cameo * 30) * 2;
+        context.strokeStyle = 'rgba(5, 8, 16, 0.85)';
+        context.lineWidth = 1.4;
+        context.beginPath();
+        context.moveTo(cxp - 3, cyp - 1);
+        context.quadraticCurveTo(cxp, cyp + 2.4, cxp + 3, cyp - 1);
+        context.moveTo(cxp, cyp + 1);
+        context.lineTo(cxp, cyp + 5);
+        context.stroke();
       }
 
-      // Draw Parallax Buildings Layer 2 (Mid-ground)
-      context.fillStyle = '#0a1020';
-      for (let b of buildingsLayer2) {
-        const bx = ((b.x - worldScrollX * 0.5) % (w + 200)) - 50;
-        context.fillRect(bx, h - b.h, b.w, b.h);
+      drawScrolledLayer(context, 1, w, h);
 
-        // Tower spire / crown
-        if (b.hasCrown) {
-          context.beginPath();
-          context.moveTo(bx + b.w * 0.2, h - b.h);
-          context.lineTo(bx + b.w * 0.5, h - b.h - 18);
-          context.lineTo(bx + b.w * 0.8, h - b.h);
-          context.closePath();
-          context.fill();
-        }
-        // Blinking red beacon on antenna
-        if (b.hasAntenna) {
-          context.strokeStyle = '#0a1020';
-          context.lineWidth = 1.5;
-          context.beginPath();
-          context.moveTo(bx + b.w * 0.5, h - b.h);
-          context.lineTo(bx + b.w * 0.5, h - b.h - 26);
-          context.stroke();
-          if (Math.sin(time * 3 + b.x) > 0) {
-            context.fillStyle = '#ef4444';
-            context.beginPath();
-            context.arc(bx + b.w * 0.5, h - b.h - 26, 1.5, 0, Math.PI * 2);
-            context.fill();
-            context.fillStyle = '#0a1020';
-          }
-        }
-      }
-
-      // Layer 3 (Foreground Canyons)
-      context.fillStyle = '#0f172a';
-      for (let b of buildingsLayer3) {
-        const bx = ((b.x - worldScrollX * 0.85) % (w + 300)) - 50;
-        context.fillRect(bx, h - b.h, b.w, b.h);
-
-        // Windows
-        context.fillStyle = 'rgba(253, 224, 71, 0.25)';
-        for (let r = 1; r < b.winRows - 1; r += 2) {
-          for (let c = 1; c < b.winCols - 1; c++) {
-            if ((b.x + r * 7 + c * 13) % 5 > 1) {
-              context.fillRect(bx + c * 16, h - b.h + r * 18, 5, 8);
+      // Aviation beacons blinking exactly on baked antenna tips (mid layer).
+      const bArr = layerBeacons[1];
+      const bStrip = layerStripW[1];
+      if (bArr && bArr.length) {
+        const bOff = (worldScrollX * LAYER_DEFS[1].speed) % bStrip;
+        const bTiles = Math.ceil(w / bStrip) + 1;
+        context.fillStyle = 'rgba(255, 96, 84, 0.95)';
+        for (let bi = 0; bi < bArr.length; bi += 2) {
+          if (Math.sin(time * 2.6 + bArr[bi] * 0.05) <= 0.55) continue;
+          for (let t = 0; t < bTiles; t++) {
+            const bx = bArr[bi] - bOff + t * bStrip;
+            if (bx >= -4 && bx <= w + 4) {
+              context.beginPath();
+              context.arc(bx, bArr[bi + 1], 1.7, 0, Math.PI * 2);
+              context.fill();
             }
           }
         }
-        context.fillStyle = '#0f172a';
       }
 
-      // Distant Street Traffic Flow (faint golden headlights & ruby taillights)
-      context.fillStyle = 'rgba(250, 204, 21, 0.55)';
-      for (let i = 0; i < 8; i++) {
-        const tx = ((i * 70 + time * 120) % (w + 100)) - 50;
-        context.fillRect(tx, h - 8, isPreview ? 8 : 16, 1.5);
+      drawScrolledLayer(context, 2, w, h);
+
+      // Street-level traffic streaks between foreground towers.
+      context.fillStyle = 'rgba(255, 214, 120, 0.5)';
+      for (let i = 0; i < 6; i++) {
+        const tx = ((i * 83 + time * 130) % (w + 90)) - 45;
+        context.fillRect(tx, h - 7, isPreview ? 7 : 14, 1.4);
       }
-      context.fillStyle = 'rgba(239, 68, 68, 0.55)';
-      for (let i = 0; i < 8; i++) {
-        const tx = w - (((i * 75 + time * 110) % (w + 100)) - 50);
-        context.fillRect(tx, h - 4, isPreview ? 8 : 16, 1.5);
+      context.fillStyle = 'rgba(235, 80, 70, 0.5)';
+      for (let i = 0; i < 6; i++) {
+        const tx = w - (((i * 97 + time * 112) % (w + 90)) - 45);
+        context.fillRect(tx - 14, h - 3.5, isPreview ? 7 : 14, 1.4);
       }
 
-      // Web Line Rendering
+      // Web strand.
+      const handX = heroX + (anchorX - heroX) * 0.14;
+      const handY = heroY + (anchorY - heroY) * 0.14;
       if (state === 'SWING') {
-        context.strokeStyle = '#ffffff';
-        context.lineWidth = isPreview ? 1.2 : 2.0;
-        context.shadowColor = '#87CEFA';
-        context.shadowBlur = 6;
-        context.beginPath();
-        context.moveTo(anchor.x, anchor.y);
-        context.lineTo(heroX, heroY);
-        context.stroke();
-        context.shadowBlur = 0;
-
-        // Anchor attachment node
-        context.fillStyle = 'rgba(255, 255, 255, 0.8)';
-        context.beginPath();
-        context.arc(anchor.x, anchor.y, 2.5, 0, Math.PI * 2);
-        context.fill();
+        drawWebStrand(context, handX, handY, anchorX, anchorY);
       } else if (state === 'SHOOT') {
-        const curShootX = heroX + (nextAnchor.x - heroX) * webShootProgress;
-        const curShootY = heroY + (nextAnchor.y - heroY) * webShootProgress;
-        context.strokeStyle = '#ffffff';
-        context.lineWidth = isPreview ? 1.2 : 2.0;
-        context.shadowColor = '#87CEFA';
-        context.shadowBlur = 8;
+        const tipX = handX + (nextAnchorX - handX) * shootProgress;
+        const tipY = handY + (nextAnchorY - handY) * shootProgress;
+        drawWebStrand(context, handX, handY, tipX, tipY);
+        context.fillStyle = 'rgba(255, 255, 255, 0.95)';
         context.beginPath();
-        context.moveTo(heroX, heroY);
-        context.lineTo(curShootX, curShootY);
-        context.stroke();
-        context.shadowBlur = 0;
-
-        // Projectile tip
-        context.fillStyle = '#ffffff';
-        context.beginPath();
-        context.arc(curShootX, curShootY, 3, 0, Math.PI * 2);
+        context.arc(tipX, tipY, 2.4, 0, Math.PI * 2);
         context.fill();
       }
 
-      // Render Spider-Man Hero Figure
+      // Hero sprite with rim glow.
+      const scaleU = isPreview ? 0.72 : 1.0;
+      const px = HERO_UNIT * 5.2 * scaleU;
+      let rot = 0, pose = POSE_SWING;
+      if (state === 'SWING') {
+        rot = theta * 0.85;
+      } else if (state === 'FLIP') {
+        rot = flipAngle;
+        pose = (Math.floor(flipAngle / Math.PI) % 2 === 0) ? POSE_FLIP_A : POSE_FLIP_B;
+      } else {
+        rot = 0.25;
+        pose = POSE_LUNGE;
+      }
       context.save();
       context.translate(heroX, heroY);
-
-      let swingRot = 0;
-      if (state === 'SWING') {
-        swingRot = theta + 0.35;
-      } else if (state === 'FLIP') {
-        swingRot = flipAngle;
-      } else {
-        swingRot = 0.2;
-      }
-      context.rotate(swingRot);
-
-      const heroScale = isPreview ? 0.75 : 1.15;
-      context.scale(heroScale, heroScale);
-
-      // Hero Body - Athletic swinging posture
-      // Crimson torso
-      context.fillStyle = '#dc2626';
-      context.beginPath();
-      context.ellipse(0, 0, 8, 14, 0, 0, Math.PI * 2);
-      context.fill();
-
-      // Deep Navy flanks
-      context.fillStyle = '#1e3a8a';
-      context.beginPath();
-      context.arc(-4, 2, 4, 0, Math.PI * 2);
-      context.arc(4, 2, 4, 0, Math.PI * 2);
-      context.fill();
-
-      // Head / Mask
-      context.fillStyle = '#dc2626';
-      context.beginPath();
-      context.arc(0, -14, 6.5, 0, Math.PI * 2);
-      context.fill();
-
-      // Iconic white angular eye lenses with black rims
-      context.fillStyle = '#0f172a';
-      context.beginPath();
-      context.moveTo(-1, -15);
-      context.lineTo(-6, -16);
-      context.lineTo(-2, -12);
-      context.closePath();
-      context.fill();
-
-      context.beginPath();
-      context.moveTo(1, -15);
-      context.lineTo(6, -16);
-      context.lineTo(2, -12);
-      context.closePath();
-      context.fill();
-
-      context.fillStyle = '#ffffff';
-      context.beginPath();
-      context.moveTo(-1.5, -15);
-      context.lineTo(-5, -15.5);
-      context.lineTo(-2.5, -13);
-      context.closePath();
-      context.fill();
-
-      context.beginPath();
-      context.moveTo(1.5, -15);
-      context.lineTo(5, -15.5);
-      context.lineTo(2.5, -13);
-      context.closePath();
-      context.fill();
-
-      // Arms: one holding web, one trailing dynamically
-      context.strokeStyle = '#dc2626';
-      context.lineWidth = 3.5;
-      context.beginPath();
-      context.moveTo(0, -6);
-      context.lineTo(-6, -18); // Hand on web strand
-      context.stroke();
-
-      context.beginPath();
-      context.moveTo(0, -6);
-      context.lineTo(9, 2);
-      context.lineTo(14, -2);
-      context.stroke();
-
-      // Legs: bent knees swinging
-      context.strokeStyle = '#1e3a8a';
-      context.lineWidth = 4;
-      context.beginPath();
-      context.moveTo(-3, 10);
-      context.lineTo(-7, 18);
-      context.lineTo(-3, 24);
-      context.moveTo(3, 10);
-      context.lineTo(8, 17);
-      context.lineTo(13, 23);
-      context.stroke();
-
+      context.globalAlpha = 0.9;
+      context.drawImage(heroGlowSprite, -px * 0.62, -px * 0.62, px * 1.24, px * 1.24);
+      context.globalAlpha = 1;
+      context.rotate(rot);
+      context.drawImage(heroPoses[pose], -px / 2, -px / 2, px, px);
       context.restore();
 
-      // Runtime subtitle
+      // Runtime subtitle.
       if (!isPreview) {
         context.fillStyle = 'rgba(135, 206, 250, 0.75)';
         context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
@@ -3998,284 +4317,765 @@ function createSpiderMan(canvas, isPreview) {
         context.fillText('CINEMATIC WORLDS: SPIDER-MAN — PENDULUM WEB KINEMATICS & CANYON SWING', 28, h - 28);
       }
     },
+
     destroy() {
-      buildingsLayer1.length = 0;
-      buildingsLayer2.length = 0;
-      buildingsLayer3.length = 0;
+      skyCanvas = null;
+      skyCtx = null;
+      layerCanvases.length = 0;
+      layerStripW.length = 0;
+      layerBeacons.length = 0;
+      heroPoses.length = 0;
+      heroGlowSprite = null;
+      webSprite = null;
     }
   };
 }
-
 /**
- * 24. BATMAN (CINEMATIC WORLDS)
- * Gothic city vigil, dark caped silhouette perched on stone gargoyle,
- * atmospheric rain, periodic lightning flashes, and sweeping spotlights projecting the Bat-Signal.
+ * 24. BATMAN (CINEMATIC WORLDS) — POLISHED REBUILD
+ * A Gotham rooftop vigil rendered as layered cinema art: two sweeping
+ * searchlights whose beams carry a slowly rotating Bat-Signal emblem across
+ * the cloud bank, lightning that re-illuminates a cached skyline with baked
+ * lit windows, driving rain in three parallax bands, and a detailed Dark
+ * Knight figure crouched on a gothic gargoyle with a wind-ridden scalloped
+ * cape and drifting bat silhouettes.
+ *
+ * Low-RAM architecture: sky/clouds/stars are one cached backdrop; both
+ * skylines are cached strips blitted twice per frame; the beam, signal disc,
+ * emblem, glow and moon sprites are baked once at resize; rain is a flat
+ * Float32 typed array drawn as two batched stroke passes; the Batman figure
+ * is a static path set replayed from a recorded Path2D-style command list
+ * plus a live cape polygon — no gradients or shadowBlur during frames.
  */
 function createBatman(canvas, isPreview) {
   let width = 0;
   let height = 0;
   let time = 0;
 
-  // Rain particles
-  const rainDrops = [];
-  const rainCount = isPreview ? 45 : 130;
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
 
-  // Searchlights
-  const spotlights = [
-    { angle: -0.3, speed: 0.45, maxAngle: 0.55, width: 0.16, hasSignal: true },
-    { angle: 0.2, speed: -0.35, maxAngle: 0.65, width: 0.14, hasSignal: false }
-  ];
+  function makeCanvas() {
+    return document.createElement('canvas');
+  }
 
-  // Cape nodes for realistic wind flutter
-  const capeNodes = 7;
-  const capeOffsets = new Float32Array(capeNodes);
+  // Feature detection: Path2D is universal in modern browsers, but fall back
+  // to immediate replay of the same geometry when unavailable.
+  const HAS_PATH2D = typeof Path2D !== 'undefined';
 
-  // Lightning system
-  let lightningTimer = 4.0;
-  let lightningAlpha = 0.0;
+  // ------------------------------------------------------------------
+  // Cached backdrop: night gradient, cloud texture, stars, distant moon
+  // ------------------------------------------------------------------
 
-  function initRain() {
-    rainDrops.length = 0;
-    for (let i = 0; i < rainCount; i++) {
-      rainDrops.push({
-        x: Math.random() * width,
-        y: Math.random() * height,
-        speed: 400 + Math.random() * 300,
-        len: 12 + Math.random() * 16,
-        alpha: 0.2 + Math.random() * 0.4
-      });
+  let bgCanvas = null, bgCtx = null;
+  let farCanvas = null, nearCanvas = null;
+  let farStripW = 0, nearStripW = 0;
+  let sceneDirty = true;
+  let worldScrollX = 0;
+
+  const FAR_SPEED = 0.06;   // slow parallax drift (px per scroll unit)
+  const NEAR_SPEED = 0.16;
+
+  function buildBackdrop(w, h) {
+    if (!bgCanvas) {
+      bgCanvas = makeCanvas();
+      bgCtx = bgCanvas.getContext('2d');
     }
+    bgCanvas.width = Math.max(1, Math.round(w));
+    bgCanvas.height = Math.max(1, Math.round(h));
+    const g = bgCtx;
+
+    const grad = g.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, '#010205');
+    grad.addColorStop(0.45, '#04060e');
+    grad.addColorStop(0.8, '#070b16');
+    grad.addColorStop(1, '#0b1020');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+
+    // Cloud mottling: soft blobs of near-black blues.
+    const rnd = mulberry32(90210);
+    for (let i = 0; i < 26; i++) {
+      const cx = rnd() * w;
+      const cy = rnd() * h * 0.55;
+      const cr = 40 + rnd() * 140;
+      const cg = g.createRadialGradient(cx, cy, 2, cx, cy, cr);
+      const tone = rnd() > 0.5 ? 'rgba(16, 22, 38, 0.5)' : 'rgba(6, 9, 18, 0.55)';
+      cg.addColorStop(0, tone);
+      cg.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      g.fillStyle = cg;
+      g.beginPath();
+      g.arc(cx, cy, cr, 0, Math.PI * 2);
+      g.fill();
+    }
+
+    // Stars peeking through breaks in the clouds (upper third).
+    const starCount = isPreview ? 26 : 60;
+    for (let i = 0; i < starCount; i++) {
+      const sx = rnd() * w;
+      const sy = rnd() * h * 0.34;
+      g.fillStyle = `rgba(215, 230, 250, ${0.08 + rnd() * 0.22})`;
+      g.fillRect(sx, sy, 1.2, 1.2);
+    }
+
+    // Pale moon behind haze, upper-left counterweight to the signal.
+    const mx = w * 0.14, my = h * 0.16, mr = isPreview ? 10 : 16;
+    const halo = g.createRadialGradient(mx, my, mr * 0.5, mx, my, mr * 3.4);
+    halo.addColorStop(0, 'rgba(200, 220, 245, 0.22)');
+    halo.addColorStop(1, 'rgba(200, 220, 245, 0)');
+    g.fillStyle = halo;
+    g.beginPath();
+    g.arc(mx, my, mr * 3.4, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = 'rgba(226, 236, 248, 0.85)';
+    g.beginPath();
+    g.arc(mx, my, mr, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = 'rgba(120, 140, 165, 0.35)';
+    g.beginPath();
+    g.arc(mx + mr * 0.3, my - mr * 0.2, mr * 0.2, 0, Math.PI * 2);
+    g.fill();
+  }
+
+  function drawSkylineStrip(c, w, h, opts) {
+    c.width = Math.max(1, Math.round(opts.stripW));
+    c.height = Math.max(1, Math.round(h));
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, opts.stripW, h);
+    const rnd = mulberry32(opts.seed);
+
+    let x = -30;
+    while (x < opts.stripW + 30) {
+      const bw = opts.wMin + rnd() * (opts.wMax - opts.wMin);
+      const bh = h * (opts.hMin + rnd() * opts.hMax);
+      const by = h - bh;
+      g.fillStyle = opts.body;
+      g.fillRect(x, by, bw, bh);
+
+      // Gothic rooflines: spires, stepped crowns, water towers.
+      const style = rnd();
+      if (style < 0.3) {
+        g.beginPath();
+        g.moveTo(x, by);
+        g.lineTo(x + bw * 0.5, by - 18 - rnd() * 26);
+        g.lineTo(x + bw, by);
+        g.closePath();
+        g.fill();
+      } else if (style < 0.55) {
+        const inset = bw * 0.18;
+        g.fillRect(x + inset, by - 12 - rnd() * 10, bw - inset * 2, 12 + rnd() * 10);
+      } else if (style < 0.68 && bw > 60) {
+        const tw = 10 + rnd() * 8;
+        g.fillRect(x + bw * (0.25 + rnd() * 0.4), by - tw - 5, tw, tw);
+      }
+
+      // Lit windows: sparse amber, rare cold blue.
+      const cell = Math.max(6, Math.round(isPreview ? 7 : 9));
+      const cols = Math.floor((bw - 10) / cell);
+      const rows = Math.floor((bh - 16) / (cell + 3));
+      for (let r = 0; r < rows; r++) {
+        for (let cc = 0; cc < cols; cc++) {
+          const roll = rnd();
+          if (roll < opts.winChance) {
+            g.fillStyle = `rgba(255, 200, 110, ${opts.winAlpha + rnd() * 0.25})`;
+            g.fillRect(x + 6 + cc * cell, by + 10 + r * (cell + 3), 3, 5);
+          } else if (roll < opts.winChance * 1.25) {
+            g.fillStyle = `rgba(135, 206, 250, ${opts.winAlpha * 0.4})`;
+            g.fillRect(x + 6 + cc * cell, by + 10 + r * (cell + 3), 3, 5);
+          }
+        }
+      }
+      x += bw + 2 + rnd() * 14;
+    }
+  }
+
+  function buildScene(w, h) {
+    buildBackdrop(w, h);
+    if (!farCanvas) farCanvas = makeCanvas();
+    if (!nearCanvas) nearCanvas = makeCanvas();
+    farStripW = Math.max(700, w + 400);
+    nearStripW = Math.max(700, w + 400);
+    drawSkylineStrip(farCanvas, w, h, {
+      stripW: farStripW, seed: 11007, body: '#05070d',
+      wMin: 40, wMax: 90, hMin: 0.30, hMax: 0.30, winChance: 0.05, winAlpha: 0.18
+    });
+    drawSkylineStrip(nearCanvas, w, h, {
+      stripW: nearStripW, seed: 4242, body: '#0a0e19',
+      wMin: 70, wMax: 140, hMin: 0.42, hMax: 0.34, winChance: 0.09, winAlpha: 0.3
+    });
+    buildSprites(w, h);
+    sceneDirty = false;
+  }
+
+  function drawScrolled(g, c, stripW, speed, w, h) {
+    if (!c || !stripW) return;
+    let off = (worldScrollX * speed) % stripW;
+    if (off < 0) off += stripW;
+    const firstX = -off;
+    g.drawImage(c, firstX, 0);
+    const tiles = Math.ceil((w - firstX) / stripW);
+    for (let t = 1; t < tiles; t++) g.drawImage(c, firstX + t * stripW, 0);
+  }
+
+  // ------------------------------------------------------------------
+  // Baked sprites: beam wedge, signal disc, emblem, glow, rain band
+  // ------------------------------------------------------------------
+
+  let beamSprite = null, discSprite = null, emblemSprite = null, glowSprite = null;
+  let BEAM_LEN = 0;
+
+  function batPath(g, R) {
+    // Classic insignia silhouette centered at origin.
+    g.beginPath();
+    g.moveTo(0, -R * 0.35);
+    g.lineTo(-R * 0.12, -R * 0.46);
+    g.lineTo(-R * 0.075, -R * 0.19);
+    g.bezierCurveTo(-R * 0.42, -R * 0.6, -R * 0.96, -R * 0.22, -R * 0.9, R * 0.16);
+    g.bezierCurveTo(-R * 0.68, R * 0.04, -R * 0.5, R * 0.36, -R * 0.3, R * 0.3);
+    g.bezierCurveTo(-R * 0.2, R * 0.46, -R * 0.08, R * 0.36, 0, R * 0.5);
+    g.bezierCurveTo(R * 0.08, R * 0.36, R * 0.2, R * 0.46, R * 0.3, R * 0.3);
+    g.bezierCurveTo(R * 0.5, R * 0.36, R * 0.68, R * 0.04, R * 0.9, R * 0.16);
+    g.bezierCurveTo(R * 0.96, -R * 0.22, R * 0.42, -R * 0.6, R * 0.075, -R * 0.19);
+    g.lineTo(R * 0.12, -R * 0.46);
+    g.closePath();
+  }
+
+  function buildSprites(w, h) {
+    BEAM_LEN = Math.round(Math.hypot(w, h) * 1.1);
+    const BW = Math.round(BEAM_LEN * 0.16);
+
+    // Beam wedge: bright at the projector lip, fading up the shaft.
+    if (!beamSprite) beamSprite = makeCanvas();
+    beamSprite.width = BEAM_LEN;
+    beamSprite.height = BW;
+    let g = beamSprite.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, BEAM_LEN, BW);
+    const lg = g.createLinearGradient(0, 0, BEAM_LEN, 0);
+    lg.addColorStop(0, 'rgba(220, 238, 255, 0.55)');
+    lg.addColorStop(0.55, 'rgba(160, 205, 250, 0.22)');
+    lg.addColorStop(1, 'rgba(135, 206, 250, 0.02)');
+    g.fillStyle = lg;
+    g.beginPath();
+    g.moveTo(0, BW / 2 - 3);
+    g.lineTo(BEAM_LEN, 0);
+    g.lineTo(BEAM_LEN, BW);
+    g.lineTo(0, BW / 2 + 3);
+    g.closePath();
+    g.fill();
+    // Hot core line near the source.
+    const core = g.createLinearGradient(0, 0, BEAM_LEN * 0.5, 0);
+    core.addColorStop(0, 'rgba(255, 255, 255, 0.5)');
+    core.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    g.strokeStyle = core;
+    g.lineWidth = 2.5;
+    g.beginPath();
+    g.moveTo(2, BW / 2);
+    g.lineTo(BEAM_LEN * 0.5, BW / 2);
+    g.stroke();
+
+    // Signal disc: blown-out spotlight pool.
+    const DS = isPreview ? 96 : 200;
+    if (!discSprite) discSprite = makeCanvas();
+    discSprite.width = DS;
+    discSprite.height = DS;
+    g = discSprite.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, DS, DS);
+    const dg = g.createRadialGradient(DS / 2, DS / 2, DS * 0.06, DS / 2, DS / 2, DS / 2);
+    dg.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+    dg.addColorStop(0.55, 'rgba(226, 242, 255, 0.75)');
+    dg.addColorStop(0.8, 'rgba(160, 205, 250, 0.35)');
+    dg.addColorStop(1, 'rgba(135, 206, 250, 0)');
+    g.fillStyle = dg;
+    g.beginPath();
+    g.arc(DS / 2, DS / 2, DS / 2, 0, Math.PI * 2);
+    g.fill();
+
+    // Emblem sprite (dark ink, drawn over the disc, rotates live).
+    const ES = Math.round(DS * 0.86);
+    if (!emblemSprite) emblemSprite = makeCanvas();
+    emblemSprite.width = ES;
+    emblemSprite.height = ES;
+    g = emblemSprite.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, ES, ES);
+    g.save();
+    g.translate(ES / 2, ES / 2);
+    g.fillStyle = 'rgba(4, 6, 12, 0.92)';
+    batPath(g, ES * 0.46);
+    g.fill();
+    g.restore();
+
+    // Soft glow used for lamp housings and lightning bloom.
+    const GS = 64;
+    if (!glowSprite) glowSprite = makeCanvas();
+    glowSprite.width = GS;
+    glowSprite.height = GS;
+    g = glowSprite.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, GS, GS);
+    const gg = g.createRadialGradient(GS / 2, GS / 2, 1, GS / 2, GS / 2, GS / 2);
+    gg.addColorStop(0, 'rgba(210, 232, 255, 0.85)');
+    gg.addColorStop(0.4, 'rgba(135, 206, 250, 0.3)');
+    gg.addColorStop(1, 'rgba(135, 206, 250, 0)');
+    g.fillStyle = gg;
+    g.fillRect(0, 0, GS, GS);
+  }
+
+  // ------------------------------------------------------------------
+  // Rain: flat SoA typed arrays, two batched stroke passes
+  // ------------------------------------------------------------------
+
+  const RAIN_COUNT = isPreview ? 70 : 190;
+  const rx = new Float32Array(RAIN_COUNT);
+  const ry = new Float32Array(RAIN_COUNT);
+  const rs = new Float32Array(RAIN_COUNT);   // fall speed
+  const rl = new Float32Array(RAIN_COUNT);   // streak length
+  const rB = new Uint8Array(RAIN_COUNT);     // 0 back layer, 1 front layer
+
+  const rdx = new Float32Array(RAIN_COUNT);   // precomputed horizontal streak offset
+  const rdy = new Float32Array(RAIN_COUNT);   // precomputed vertical streak length
+
+  function initRain(w, h) {
+    for (let i = 0; i < RAIN_COUNT; i++) {
+      rx[i] = Math.random() * (w + 120) - 60;
+      ry[i] = Math.random() * h;
+      rs[i] = 320 + Math.random() * 340;
+      rl[i] = 9 + Math.random() * 15;
+      rB[i] = i % 2;
+      const front = rB[i] === 1;
+      rdx[i] = rl[i] * (front ? 0.28 : 0.24);
+      rdy[i] = rl[i] * (front ? 1.3 : 1.0);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Drifting bat silhouettes (tiny live paths, max 3)
+  // ------------------------------------------------------------------
+
+  const BAT_COUNT = isPreview ? 2 : 3;
+  const bx = new Float32Array(BAT_COUNT);
+  const by = new Float32Array(BAT_COUNT);
+  const bs = new Float32Array(BAT_COUNT);    // scale
+  const bv = new Float32Array(BAT_COUNT);    // horizontal speed
+  const bp = new Float32Array(BAT_COUNT);    // flap phase offset
+
+  function initBats(w, h) {
+    for (let i = 0; i < BAT_COUNT; i++) {
+      bx[i] = Math.random() * w;
+      by[i] = h * (0.12 + Math.random() * 0.25);
+      bs[i] = 4 + Math.random() * 5;
+      bv[i] = 18 + Math.random() * 26;
+      bp[i] = Math.random() * Math.PI * 2;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Gargoyle ledge geometry (computed at draw so it scales with viewport)
+  // ------------------------------------------------------------------
+
+  function ledgePose(w, h) {
+    const gx = w * (isPreview ? 0.24 : 0.28);
+    const gy = h * 0.74;
+    return { gx, gy };
+  }
+
+  // ------------------------------------------------------------------
+  // Simulation state
+  // ------------------------------------------------------------------
+
+  const spotlights = [
+    { angle: -0.35, speed: 0.30, maxAngle: 0.5, hasSignal: true },
+    { angle: 0.25, speed: -0.24, maxAngle: 0.55, hasSignal: false }
+  ];
+  let signalSpin = 0;
+  let lightningTimer = 3.5;
+  let lightningAlpha = 0;
+  let boltSeed = 1;
+  let boltActive = false;
+  const CAPE_NODES = 8;
+  const capeOffsets = new Float32Array(CAPE_NODES);
+
+  // Static figure geometry recorded once into Path2D objects; only the cape
+  // polygon is rebuilt per frame from the flutter nodes.
+  let knightBodyPath = null, knightLimbPath = null, knightCowlPath = null;
+  let knightEyePath = null, knightRimPath = null;
+
+  function buildKnightPaths() {
+    if (!HAS_PATH2D) return;
+    knightBodyPath = new Path2D();
+    knightBodyPath.ellipse(2, 6, 11, 8, -0.12, 0, Math.PI * 2);   // haunches
+    knightBodyPath.moveTo(12.5, -3);
+    knightBodyPath.ellipse(6, -3, 6.5, 8, 0.35, 0, Math.PI * 2);  // chest/shoulders
+
+    knightLimbPath = new Path2D();
+    knightLimbPath.moveTo(8, -2);          // arm braced on knee
+    knightLimbPath.lineTo(14, 6);
+    knightLimbPath.lineTo(12, 13);
+    knightLimbPath.moveTo(0, 10);          // folded legs
+    knightLimbPath.lineTo(9, 15);
+    knightLimbPath.lineTo(6, 20);
+    knightLimbPath.moveTo(-2, 10);
+    knightLimbPath.lineTo(-8, 16);
+    knightLimbPath.lineTo(-4, 21);
+
+    knightCowlPath = new Path2D();
+    knightCowlPath.moveTo(2, -10);
+    knightCowlPath.lineTo(-1, -24);        // left ear
+    knightCowlPath.lineTo(4, -13);
+    knightCowlPath.lineTo(9, -13);
+    knightCowlPath.lineTo(13, -23);        // right ear
+    knightCowlPath.lineTo(11, -10);
+    knightCowlPath.quadraticCurveTo(14, -6, 11, -2);
+    knightCowlPath.quadraticCurveTo(6, 1, 2, -2);
+    knightCowlPath.quadraticCurveTo(0, -6, 2, -10);
+    knightCowlPath.closePath();
+
+    knightEyePath = new Path2D();
+    knightEyePath.moveTo(6, -7);           // narrow glowing lens
+    knightEyePath.lineTo(11.5, -8.5);
+    knightEyePath.lineTo(11, -6.2);
+    knightEyePath.lineTo(6.5, -5.6);
+    knightEyePath.closePath();
+
+    knightRimPath = new Path2D();
+    knightRimPath.moveTo(11, -10);         // moonlit pauldron/cowl rim
+    knightRimPath.quadraticCurveTo(14, -5, 12, 0);
+    knightRimPath.moveTo(9, -6);
+    knightRimPath.quadraticCurveTo(12.5, -1, 10, 4);
   }
 
   return {
     resize(w, h) {
       width = w;
       height = h;
-      initRain();
+      buildScene(w, h);
+      initRain(w, h);
+      initBats(w, h);
     },
+
     update(dt, isHovered) {
       const motionScale = prefersReducedMotion ? 0.35 : 1.0;
       const speedMult = (isHovered && !prefersReducedMotion ? 1.35 : 1.0) * motionScale;
       const stepDt = Math.min(dt, 0.08) * speedMult;
       time += stepDt;
+      worldScrollX += 12 * stepDt;
 
-      // Update rain
-      for (let r of rainDrops) {
-        r.y += r.speed * stepDt;
-        r.x += r.speed * 0.22 * stepDt; // diagonal driving wind
-        if (r.y > height) {
-          r.y = -20;
-          r.x = Math.random() * width;
+      // Rain: wind-blown diagonals, recycled at the bottom edge.
+      const wind = 0.24;
+      for (let i = 0; i < RAIN_COUNT; i++) {
+        ry[i] += rs[i] * stepDt;
+        rx[i] += rs[i] * wind * stepDt;
+        if (ry[i] > height + 20) {
+          ry[i] = -20;
+          rx[i] = Math.random() * (width + 120) - 60;
+        } else if (rx[i] > width + 60) {
+          rx[i] = -60;
         }
       }
 
-      // Update sweeping spotlights
-      for (let s of spotlights) {
+      // Searchlight sweep.
+      for (const s of spotlights) {
         s.angle += s.speed * stepDt;
-        if (Math.abs(s.angle) > s.maxAngle) {
-          s.speed *= -1;
-        }
+        if (Math.abs(s.angle) > s.maxAngle) s.speed *= -1;
+      }
+      signalSpin += stepDt * 0.35;
+
+      // Cape flutter nodes.
+      for (let i = 0; i < CAPE_NODES; i++) {
+        capeOffsets[i] = Math.sin(time * 5.2 + i * 0.9) * (5 + i * 3.4)
+          + Math.sin(time * 2.1 + i * 0.4) * 3;
       }
 
-      // Update cape flutter
-      for (let i = 0; i < capeNodes; i++) {
-        capeOffsets[i] = Math.sin(time * 6 + i * 0.8) * (8 + i * 4);
-      }
-
-      // Lightning triggers
+      // Lightning: flash decay plus occasional double-strike stutter.
       lightningTimer -= stepDt;
       if (lightningTimer <= 0) {
-        lightningAlpha = 0.85;
-        lightningTimer = 5 + Math.random() * 6;
+        lightningAlpha = 0.9;
+        boltActive = true;
+        boltSeed = (boltSeed * 16807) % 2147483647;
+        lightningTimer = 4.5 + Math.random() * 6;
       }
       if (lightningAlpha > 0) {
-        lightningAlpha = Math.max(0, lightningAlpha - stepDt * 4.5);
+        lightningAlpha = Math.max(0, lightningAlpha - stepDt * 3.2);
+        if (lightningAlpha < 0.001) boltActive = false;
+      }
+
+      // Bats drift across the skyline.
+      for (let i = 0; i < BAT_COUNT; i++) {
+        bx[i] += bv[i] * stepDt;
+        by[i] += Math.sin(time * 1.3 + bp[i]) * 6 * stepDt;
+        if (bx[i] > width + 40) {
+          bx[i] = -40;
+          by[i] = height * (0.12 + Math.random() * 0.25);
+        }
       }
     },
+
     draw(context, w, h) {
-      // Dark cloudy night sky with lightning flash
-      context.fillStyle = lightningAlpha > 0.3 ? `rgba(200, 220, 240, ${lightningAlpha * 0.4})` : '#020308';
-      context.fillRect(0, 0, w, h);
+      if (sceneDirty) buildScene(w, h);
 
-      // Heavy gothic cloud bank
-      const cloudGrad = context.createRadialGradient(w * 0.5, h * 0.25, 40, w * 0.5, h * 0.25, w * 0.65);
-      cloudGrad.addColorStop(0, '#0a0e1c');
-      cloudGrad.addColorStop(0.6, '#05070f');
-      cloudGrad.addColorStop(1, '#020308');
-      context.fillStyle = cloudGrad;
-      context.fillRect(0, 0, w, h * 0.7);
+      context.drawImage(bgCanvas, 0, 0, w, h);
 
-      // Sweeping Spotlights & Bat-Signal
-      for (let s of spotlights) {
-        context.save();
-        const beamOriginX = w * (s.hasSignal ? 0.35 : 0.75);
-        const beamOriginY = h;
-        const targetX = beamOriginX + Math.sin(s.angle) * h * 1.2;
-        const targetY = h * 0.22;
+      // Far skyline.
+      drawScrolled(context, farCanvas, farStripW, FAR_SPEED, w, h);
 
-        const beamGrad = context.createLinearGradient(beamOriginX, beamOriginY, targetX, targetY);
-        beamGrad.addColorStop(0, 'rgba(135, 206, 250, 0.45)');
-        beamGrad.addColorStop(0.7, 'rgba(135, 206, 250, 0.18)');
-        beamGrad.addColorStop(1, 'rgba(255, 255, 255, 0.65)');
-
-        context.fillStyle = beamGrad;
+      // Lightning fork (only during a strike): jagged cool-white bolt.
+      if (boltActive && lightningAlpha > 0.25) {
+        let seed = boltSeed;
+        const rnd = function () {
+          seed = (seed * 48271) % 2147483647;
+          return seed / 2147483647;
+        };
+        const startX = w * (0.3 + (boltSeed % 100) / 250);
+        let px = startX, py = 0;
+        context.strokeStyle = `rgba(225, 240, 255, ${Math.min(1, lightningAlpha * 1.2)})`;
+        context.lineWidth = 1.6;
         context.beginPath();
-        context.moveTo(beamOriginX - 8, beamOriginY);
-        context.lineTo(targetX - w * s.width, targetY);
-        context.lineTo(targetX + w * s.width, targetY);
-        context.lineTo(beamOriginX + 8, beamOriginY);
-        context.closePath();
-        context.fill();
-
-        // Project the Bat-Signal on cloud base
-        if (s.hasSignal) {
-          context.save();
-          context.translate(targetX, targetY);
-          const sigR = isPreview ? 18 : 34;
-
-          // Glowing spotlight circle
-          const spotCircle = context.createRadialGradient(0, 0, sigR * 0.2, 0, 0, sigR * 1.2);
-          spotCircle.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
-          spotCircle.addColorStop(0.7, 'rgba(135, 206, 250, 0.6)');
-          spotCircle.addColorStop(1, 'rgba(135, 206, 250, 0)');
-          context.fillStyle = spotCircle;
-          context.beginPath();
-          context.arc(0, 0, sigR * 1.2, 0, Math.PI * 2);
-          context.fill();
-
-          // Bat Insignia Silhouette
-          context.fillStyle = '#05070f';
-          context.beginPath();
-          // Head & ears
-          context.moveTo(0, -sigR * 0.35);
-          context.lineTo(-sigR * 0.12, -sigR * 0.45);
-          context.lineTo(-sigR * 0.08, -sigR * 0.2);
-          // Left wing scallops
-          context.bezierCurveTo(-sigR * 0.4, -sigR * 0.6, -sigR * 0.95, -sigR * 0.2, -sigR * 0.9, sigR * 0.15);
-          context.bezierCurveTo(-sigR * 0.7, sigR * 0.05, -sigR * 0.5, sigR * 0.35, -sigR * 0.3, sigR * 0.3);
-          context.bezierCurveTo(-sigR * 0.2, sigR * 0.45, -sigR * 0.08, sigR * 0.35, 0, sigR * 0.48);
-          // Right wing scallops (mirrored)
-          context.bezierCurveTo(sigR * 0.08, sigR * 0.35, sigR * 0.2, sigR * 0.45, sigR * 0.3, sigR * 0.3);
-          context.bezierCurveTo(sigR * 0.5, sigR * 0.35, sigR * 0.7, sigR * 0.05, sigR * 0.9, sigR * 0.15);
-          context.bezierCurveTo(sigR * 0.95, -sigR * 0.2, sigR * 0.4, -sigR * 0.6, sigR * 0.08, -sigR * 0.2);
-          context.lineTo(sigR * 0.12, -sigR * 0.45);
-          context.closePath();
-          context.fill();
-
-          context.restore();
+        context.moveTo(px, py);
+        while (py < h * 0.55) {
+          py += 26 + rnd() * 34;
+          px += (rnd() - 0.5) * 90;
+          context.lineTo(px, py);
+          if (rnd() > 0.72) {
+            // Branch stub.
+            const bpx = px + (rnd() - 0.5) * 60;
+            const bpy = py + 18 + rnd() * 26;
+            context.moveTo(px, py);
+            context.lineTo(bpx, bpy);
+            context.moveTo(px, py);
+          }
         }
-
-        context.restore();
-      }
-
-      // Distant Gothic City Spires
-      context.fillStyle = '#060913';
-      const numSpires = isPreview ? 5 : 9;
-      for (let i = 0; i < numSpires; i++) {
-        const sx = (w / numSpires) * i + 20;
-        const sh = h * (0.35 + (i % 3) * 0.12);
-        const sw = w / (numSpires * 1.5);
-        context.fillRect(sx, h - sh, sw, sh);
-        // Cathedral spire peak
-        context.beginPath();
-        context.moveTo(sx, h - sh);
-        context.lineTo(sx + sw * 0.5, h - sh - 35);
-        context.lineTo(sx + sw, h - sh);
-        context.closePath();
-        context.fill();
-      }
-
-      // Foreground: Stone Gargoyle Cornice on left side
-      const gx = w * (isPreview ? 0.22 : 0.26);
-      const gy = h * 0.72;
-
-      context.fillStyle = '#0d131f';
-      context.beginPath();
-      context.moveTo(0, h);
-      context.lineTo(gx, h);
-      context.lineTo(gx + 40, gy);
-      context.lineTo(gx + 20, gy - 20); // Gargoyle snout / head
-      context.lineTo(gx - 20, gy - 10);
-      context.lineTo(0, gy + 50);
-      context.closePath();
-      context.fill();
-
-      // Gargoyle eye / stone bevel
-      context.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-      context.lineWidth = 1.5;
-      context.beginPath();
-      context.moveTo(gx + 40, gy);
-      context.lineTo(gx + 20, gy - 20);
-      context.lineTo(gx - 20, gy - 10);
-      context.stroke();
-
-      // Batman Figure crouched on the gargoyle
-      const bx = gx - 10;
-      const by = gy - 36;
-      const bScale = isPreview ? 0.8 : 1.25;
-
-      context.save();
-      context.translate(bx, by);
-      context.scale(bScale, bScale);
-
-      // Billowing Scalloped Cape
-      context.fillStyle = '#070a12';
-      context.beginPath();
-      context.moveTo(4, 6);
-      for (let i = 0; i < capeNodes; i++) {
-        const cxNode = -15 - i * 14 + capeOffsets[i];
-        const cyNode = 10 + i * 8;
-        context.lineTo(cxNode, cyNode);
-      }
-      context.lineTo(-6, 24);
-      context.closePath();
-      context.fill();
-
-      // Cape wing scallops
-      context.strokeStyle = 'rgba(135, 206, 250, 0.25)';
-      context.lineWidth = 1.0;
-      context.stroke();
-
-      // Dark Knight Torso & Crouched Posture
-      context.fillStyle = '#05070d';
-      context.beginPath();
-      context.ellipse(6, 12, 10, 16, 0.2, 0, Math.PI * 2);
-      context.fill();
-
-      // Cowl & Sharp Ears
-      context.beginPath();
-      context.moveTo(2, -6);
-      context.lineTo(0, -18); // Left sharp ear
-      context.lineTo(4, -8);
-      context.lineTo(8, -8);
-      context.lineTo(12, -18); // Right sharp ear
-      context.lineTo(10, -6);
-      context.arc(6, -4, 6, 0, Math.PI);
-      context.closePath();
-      context.fill();
-
-      // Glowing white cowl eye slit
-      context.fillStyle = '#f8fafc';
-      context.beginPath();
-      context.moveTo(7, -4);
-      context.lineTo(11, -5);
-      context.lineTo(9, -3);
-      context.closePath();
-      context.fill();
-
-      context.restore();
-
-      // Driving rain streaks
-      context.lineWidth = 1;
-      for (let r of rainDrops) {
-        context.strokeStyle = `rgba(180, 210, 245, ${r.alpha})`;
-        context.beginPath();
-        context.moveTo(r.x, r.y);
-        context.lineTo(r.x + r.len * 0.22, r.y + r.len);
         context.stroke();
       }
 
-      // Runtime subtitle
+      // Searchlight beams (baked wedge sprites rotated into place).
+      for (const s of spotlights) {
+        const ox = w * (s.hasSignal ? 0.42 : 0.8);
+        const oy = h + 6;
+        const ang = -Math.PI / 2 + s.angle;
+        context.save();
+        context.translate(ox, oy);
+        context.rotate(ang);
+        context.globalAlpha = 0.9;
+        context.drawImage(beamSprite, 0, -BEAM_LEN * 0.08, BEAM_LEN, BEAM_LEN * 0.16);
+        context.restore();
+
+        // Projected Bat-Signal riding the cloud base at the beam's head.
+        if (s.hasSignal) {
+          const reach = h * 0.62;
+          const tx = ox + Math.cos(ang) * reach;
+          const ty = oy + Math.sin(ang) * reach;
+          const DS = isPreview ? 62 : 118;
+          context.save();
+          context.translate(tx, ty);
+          context.globalAlpha = 0.92;
+          context.drawImage(discSprite, -DS / 2, -DS / 2, DS, DS);
+          context.rotate(signalSpin);
+          context.drawImage(emblemSprite, -DS * 0.43, -DS * 0.43, DS * 0.86, DS * 0.86);
+          context.restore();
+        }
+
+        // Rooftop lamp housing glow.
+        context.globalAlpha = 0.8;
+        context.drawImage(glowSprite, ox - 14, oy - 26, 28, 28);
+        context.globalAlpha = 1;
+      }
+
+      // Near skyline.
+      drawScrolled(context, nearCanvas, nearStripW, NEAR_SPEED, w, h);
+
+      // Back rain layer (dimmer, shorter).
+      context.lineWidth = 1;
+      context.strokeStyle = 'rgba(150, 185, 225, 0.22)';
+      context.beginPath();
+      for (let i = 0; i < RAIN_COUNT; i++) {
+        if (rB[i] !== 0) continue;
+        context.moveTo(rx[i], ry[i]);
+        context.lineTo(rx[i] + rdx[i], ry[i] + rdy[i]);
+      }
+      context.stroke();
+
+      // Drifting bat silhouettes against the glow between skylines.
+      context.fillStyle = 'rgba(3, 5, 10, 0.85)';
+      for (let i = 0; i < BAT_COUNT; i++) {
+        const flap = Math.sin(time * 7 + bp[i]) * 0.5 + 0.5;
+        const sz = bs[i];
+        const wy = sz * (0.5 + flap * 0.7);
+        context.beginPath();
+        context.moveTo(bx[i] - sz, by[i]);
+        context.quadraticCurveTo(bx[i] - sz * 0.4, by[i] - wy, bx[i], by[i]);
+        context.quadraticCurveTo(bx[i] + sz * 0.4, by[i] - wy, bx[i] + sz, by[i]);
+        context.quadraticCurveTo(bx[i] + sz * 0.3, by[i] + sz * 0.28, bx[i], by[i] + sz * 0.2);
+        context.quadraticCurveTo(bx[i] - sz * 0.3, by[i] + sz * 0.28, bx[i] - sz, by[i]);
+        context.fill();
+      }
+
+      // Gargoyle ledge with cornice detail and down-light rim.
+      const { gx, gy } = ledgePose(w, h);
+      context.fillStyle = '#0c1220';
+      context.beginPath();
+      context.moveTo(0, h);
+      context.lineTo(0, gy + 60);
+      context.lineTo(gx - 46, gy + 14);
+      context.lineTo(gx - 30, gy - 2);
+      context.lineTo(gx + 6, gy - 6);
+      context.lineTo(gx + 34, gy + 6);      // snout
+      context.lineTo(gx + 46, gy + 2);
+      context.lineTo(gx + 40, gy + 16);      // jaw notch
+      context.lineTo(gx + 20, gy + 18);
+      context.lineTo(gx + 52, gy + 40);
+      context.lineTo(gx + 60, h);
+      context.closePath();
+      context.fill();
+      // Cornice bevel highlights.
+      context.strokeStyle = 'rgba(135, 206, 250, 0.16)';
+      context.lineWidth = 1.4;
+      context.beginPath();
+      context.moveTo(gx - 30, gy - 2);
+      context.lineTo(gx + 6, gy - 6);
+      context.lineTo(gx + 34, gy + 6);
+      context.stroke();
+      context.strokeStyle = 'rgba(255, 255, 255, 0.07)';
+      context.beginPath();
+      context.moveTo(gx + 40, gy + 16);
+      context.lineTo(gx + 52, gy + 40);
+      context.stroke();
+      // Gargoyle eye glint.
+      context.fillStyle = 'rgba(135, 206, 250, 0.35)';
+      context.fillRect(gx + 16, gy - 1, 3, 1.6);
+
+      // The Dark Knight, crouched and watching (static parts cached as Path2D).
+      const bScale = isPreview ? 0.9 : 1.5;
+      context.save();
+      context.translate(gx - 2, gy - 8);
+      context.scale(bScale, bScale);
+
+      // Wind-ridden scalloped cape (live polygon, cheap).
+      context.fillStyle = '#04060c';
+      context.beginPath();
+      context.moveTo(6, -8);
+      for (let i = 0; i < CAPE_NODES; i++) {
+        const t = i / (CAPE_NODES - 1);
+        const cxn = -8 - t * 46 + capeOffsets[i] * 0.55;
+        const cyn = -6 + t * 34 + capeOffsets[i] * 0.22;
+        context.lineTo(cxn, cyn);
+        // Scalloped trailing-edge ripple.
+        if (i < CAPE_NODES - 1) {
+          context.quadraticCurveTo(
+            cxn - 4, cyn + 5 + capeOffsets[i] * 0.1,
+            -8 - ((i + 1) / (CAPE_NODES - 1)) * 46 + capeOffsets[i + 1] * 0.55,
+            -6 + ((i + 1) / (CAPE_NODES - 1)) * 34 + capeOffsets[i + 1] * 0.22
+          );
+        }
+      }
+      context.lineTo(2, 20);
+      context.closePath();
+      context.fill();
+      context.strokeStyle = 'rgba(135, 206, 250, 0.12)';
+      context.lineWidth = 0.8;
+      context.stroke();
+
+      if (HAS_PATH2D) {
+        if (!knightBodyPath) buildKnightPaths();
+        context.fillStyle = '#060810';
+        context.fill(knightBodyPath);
+        context.strokeStyle = '#060810';
+        context.lineWidth = 3.6;
+        context.lineCap = 'round';
+        context.stroke(knightLimbPath);
+        context.fillStyle = '#05070d';
+        context.fill(knightCowlPath);
+        context.fillStyle = '#eef6ff';
+        context.fill(knightEyePath);
+        // Moonlit rim light along the pauldron and cowl.
+        context.strokeStyle = 'rgba(200, 224, 250, 0.35)';
+        context.lineWidth = 1;
+        context.stroke(knightRimPath);
+      } else {
+        context.fillStyle = '#060810';
+        context.beginPath();
+        context.ellipse(2, 6, 11, 8, -0.12, 0, Math.PI * 2);
+        context.fill();
+        context.beginPath();
+        context.ellipse(6, -3, 6.5, 8, 0.35, 0, Math.PI * 2);
+        context.fill();
+        context.strokeStyle = '#060810';
+        context.lineWidth = 3.6;
+        context.lineCap = 'round';
+        context.beginPath();
+        context.moveTo(8, -2);
+        context.lineTo(14, 6);
+        context.lineTo(12, 13);
+        context.moveTo(0, 10);
+        context.lineTo(9, 15);
+        context.lineTo(6, 20);
+        context.moveTo(-2, 10);
+        context.lineTo(-8, 16);
+        context.lineTo(-4, 21);
+        context.stroke();
+        context.fillStyle = '#05070d';
+        context.beginPath();
+        context.moveTo(2, -10);
+        context.lineTo(-1, -24);
+        context.lineTo(4, -13);
+        context.lineTo(9, -13);
+        context.lineTo(13, -23);
+        context.lineTo(11, -10);
+        context.quadraticCurveTo(14, -6, 11, -2);
+        context.quadraticCurveTo(6, 1, 2, -2);
+        context.quadraticCurveTo(0, -6, 2, -10);
+        context.closePath();
+        context.fill();
+        context.fillStyle = '#eef6ff';
+        context.beginPath();
+        context.moveTo(6, -7);
+        context.lineTo(11.5, -8.5);
+        context.lineTo(11, -6.2);
+        context.lineTo(6.5, -5.6);
+        context.closePath();
+        context.fill();
+        context.strokeStyle = 'rgba(200, 224, 250, 0.35)';
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(11, -10);
+        context.quadraticCurveTo(14, -5, 12, 0);
+        context.moveTo(9, -6);
+        context.quadraticCurveTo(12.5, -1, 10, 4);
+        context.stroke();
+      }
+
+      context.restore();
+
+      // Front rain layer (brighter, longer streaks).
+      context.lineWidth = 1.3;
+      context.strokeStyle = 'rgba(185, 212, 245, 0.4)';
+      context.beginPath();
+      for (let i = 0; i < RAIN_COUNT; i++) {
+        if (rB[i] !== 1) continue;
+        context.moveTo(rx[i], ry[i]);
+        context.lineTo(rx[i] + rdx[i], ry[i] + rdy[i]);
+      }
+      context.stroke();
+
+      // Lightning full-frame bloom wash.
+      if (lightningAlpha > 0.05) {
+        context.globalAlpha = lightningAlpha * 0.35;
+        context.drawImage(glowSprite, w * 0.5 - w, -h * 0.2, w * 2, h * 1.4);
+        context.globalAlpha = 1;
+      }
+
+      // Cinematic vignette baked cheaply: darkened corners via edge rects.
+      context.fillStyle = 'rgba(0, 0, 0, 0.28)';
+      context.fillRect(0, 0, w, 6);
+      context.fillRect(0, h - 6, w, 6);
+
+      // Runtime subtitle.
       if (!isPreview) {
         context.fillStyle = 'rgba(135, 206, 250, 0.75)';
         context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
@@ -4283,12 +5083,24 @@ function createBatman(canvas, isPreview) {
         context.fillText('CINEMATIC WORLDS: BATMAN — GOTHIC VIGIL & PROJECTED SEARCHLIGHT SIGNAL', 28, h - 28);
       }
     },
+
     destroy() {
-      rainDrops.length = 0;
+      bgCanvas = null;
+      bgCtx = null;
+      farCanvas = null;
+      nearCanvas = null;
+      beamSprite = null;
+      discSprite = null;
+      emblemSprite = null;
+      glowSprite = null;
+      knightBodyPath = null;
+      knightLimbPath = null;
+      knightCowlPath = null;
+      knightEyePath = null;
+      knightRimPath = null;
     }
   };
 }
-
 /**
  * 25. INTERSTELLAR (CINEMATIC WORLDS)
  * NASA / Thorne relativistic black hole (Gargantua) visualization with
