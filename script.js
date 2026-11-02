@@ -52,15 +52,15 @@ const CATEGORIES = [
     savers: [
       { id: 'spider-man', title: 'Spider-Man', create: createSpiderMan },
       { id: 'batman', title: 'Batman', create: createBatman },
-      { id: 'interstellar', title: 'Interstellar', create: createInterstellar },
-      { id: 'highway', title: 'Highway', create: createHighway }
+      { id: 'interstellar', title: 'Interstellar', create: createInterstellar }
     ]
   },
   {
-    id: 'ocean-exploration',
-    title: 'Ocean Exploration',
+    id: 'exploration',
+    title: 'Exploration',
     savers: [
-      { id: 'under-the-ocean', title: 'Under the Ocean', create: createUnderTheOcean }
+      { id: 'under-the-ocean', title: 'Under the Ocean', create: createUnderTheOcean },
+      { id: 'highway', title: 'Highway', create: createHighway }
     ]
   },
   {
