@@ -1,0 +1,608 @@
+diff --git a/script.js b/script.js
+index c4a0a66..f6eec2d 100644
+--- a/script.js
++++ b/script.js
+@@ -56,10 +56,11 @@ const CATEGORIES = [
+     ]
+   },
+   {
+-    id: 'ocean-exploration',
+-    title: 'Ocean Exploration',
++    id: 'exploration',
++    title: 'Exploration',
+     savers: [
+-      { id: 'under-the-ocean', title: 'Under the Ocean', create: createUnderTheOcean }
++      { id: 'under-the-ocean', title: 'Under the Ocean', create: createUnderTheOcean },
++      { id: 'highway', title: 'Highway', create: createHighway }
+     ]
+   },
+   {
+@@ -6050,6 +6051,588 @@ function createTerminal(canvas, isPreview) {
+   };
+ }
+ 
++/**
++ * 33. HIGHWAY (CINEMATIC WORLDS) — SEAMLESS LOOP
++ * Rear chase-cam of a black sedan driving down a dead-straight unlit night highway.
++ * No neon, no street lamps — only moonlight rim highlights and the car's own lights.
++ * PERFECTLY SEAMLESS first/last frame blend: every animated element (road dashes,
++ * reflector posts, roadside delineators, guardrails, distant treeline, starfield,
++ * headlight cone texture, body roll and wheel spokes) is driven by a single master
++ * phase clock P ∈ [0,1) whose scroll periods tile EXACTLY into one loop, so frame 0
++ * and frame N are pixel-identical and the animation feels infinite.
++ */
++function createHighway(canvas, isPreview) {
++  let width = 0;
++  let height = 0;
++
++  // Master loop period (seconds). All motion frequencies are integer multiples
++  // of 1/LOOP_PERIOD, guaranteeing the first and last frames blend seamlessly.
++  const LOOP_PERIOD = 12;
++  let phase = 0;         // master phase P ∈ [0,1) — exact modulo keeps the seam pixel-identical
++  let loopCount = 0;     // completed seamless loops
++
++  // Wrap helper: robust against floating-point accumulation drift so that
++  // frame at P→1 is mathematically identical to frame at P=0. Values within
++  // an epsilon of the seam snap exactly to 0, guaranteeing a pixel-identical
++  // blend even after thousands of rAF delta accumulations.
++  const SEAM_EPS = 1e-6;
++  function wrap01(v) {
++    let x = ((v % 1) + 1) % 1;
++    if (x > 1 - SEAM_EPS) x = 0;
++    return x;
++  }
++
++  // Deterministic seeded RNG (mulberry32) so recycled scenery matches its
++  // wrap-around counterpart exactly across the seam.
++  function mulberry32(a) {
++    return function () {
++      a |= 0; a = (a + 0x6D2B79F5) | 0;
++      let t = Math.imul(a ^ (a >>> 15), 1 | a);
++      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
++      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
++    };
++  }
++
++  // ---- Static scene data -------------------------------------------------
++  const STAR_COUNT = isPreview ? 70 : 160;
++  const stars = [];
++  const TWINKLE_CYCLES = 3; // integer → twinkling tiles perfectly into the loop
++  {
++    const rng = mulberry32(0xA17B2C);
++    for (let i = 0; i < STAR_COUNT; i++) {
++      stars.push({
++        x: rng(),                       // fraction of width
++        y: rng() * 0.55,                // upper sky band (fraction of height)
++        r: 0.5 + rng() * 1.1,
++        baseA: 0.25 + rng() * 0.6,
++        cyc: 1 + Math.floor(rng() * TWINKLE_CYCLES), // integer cycles per loop
++        ph: rng()                        // 0..1 phase offset (maps to 0..2π)
++      });
++    }
++  }
++
++  // Distant treeline silhouette: two harmonic layers, each with an integer
++  // number of bumps scrolling exactly across the screen per loop.
++  const TREE_BUMPS_A = 26, TREE_BUMPS_B = 41; // integers → seamless scroll
++  const treeAmpA = [], treeAmpB = [];
++  {
++    const rng = mulberry32(0x5EED01);
++    for (let i = 0; i < TREE_BUMPS_A; i++) treeAmpA.push(0.55 + rng() * 0.45);
++    for (let i = 0; i < TREE_BUMPS_B; i++) treeAmpB.push(0.4 + rng() * 0.6);
++  }
++
++  // Near roadside pine delineators (the classic reflective night-highway
++  // markers). Positions derive purely from the master phase — no state —
++  // so they wrap identically at the seam.
++  const NEAR_POST_SPAN = 14;   // posts visible across the loop window
++  const FAR_POST_SPAN = 22;    // fast side reflector poles on the shoulder
++
++  // Headlight beam flicker: integer cycles per loop.
++  const BEAM_FLICKER_CYCLES = 8;
++
++  // Car suspension roll/sway: integer cycles per loop → seamless.
++  const ROLL_CYCLES = 5;
++  const SWAY_CYCLES = 3;
++  const BOB_CYCLES = 9;
++
++  // Wheel spin frequency (visual rotations per second — continuous, but the
++  // spoke pattern plus speed-blur makes the loop boundary imperceptible).
++  const WHEEL_HZ = 11;
++
++  function drawCarBody(ctx, cx, cy, s) {
++    // Local units: length 200 (front at -100), height ~100 centered at wheels.
++    ctx.save();
++    ctx.translate(cx, cy);
++    ctx.scale(s, s);
++
++    // --- Contact shadow under the car ---
++    ctx.fillStyle = 'rgba(0,0,0,0.55)';
++    ctx.beginPath();
++    ctx.ellipse(0, 26, 108, 12, 0, 0, Math.PI * 2);
++    ctx.fill();
++
++    // --- Tires + spinning wheels (visible through wheel arches) ---
++    const spin = (phase * LOOP_PERIOD * WHEEL_HZ) * Math.PI * 2;
++    const wheels = [[-58, 14], [58, 14]];
++    for (const [wx, wy] of wheels) {
++      ctx.save();
++      ctx.translate(wx, wy);
++      // Tire
++      ctx.fillStyle = '#050506';
++      ctx.beginPath();
++      ctx.arc(0, 0, 15, 0, Math.PI * 2);
++      ctx.fill();
++      // Rim
++      ctx.fillStyle = '#101114';
++      ctx.beginPath();
++      ctx.arc(0, 0, 9.5, 0, Math.PI * 2);
++      ctx.fill();
++      // Motion-blurred spokes: rotating arcs, subtle enough to read as speed
++      ctx.rotate(spin);
++      ctx.strokeStyle = 'rgba(120,128,140,0.35)';
++      ctx.lineWidth = 1.6;
++      for (let k = 0; k < 5; k++) {
++        ctx.beginPath();
++        ctx.arc(0, 0, 6.5, (k / 5) * Math.PI * 2, (k / 5) * Math.PI * 2 + 0.5);
++        ctx.stroke();
++      }
++      ctx.restore();
++    }
++
++    // --- Main rear 3/4 sedan silhouette (black) ---
++    ctx.beginPath();
++    ctx.moveTo(-100, 4);            // front bumper bottom
++    ctx.lineTo(-102, -8);           // front bumper face
++    ctx.quadraticCurveTo(-98, -18, -84, -22); // hood nose
++    ctx.lineTo(-52, -28);           // hood flat
++    ctx.quadraticCurveTo(-40, -30, -30, -46); // windshield base → up
++    ctx.quadraticCurveTo(-14, -62, 8, -64);   // roof front curve
++    ctx.lineTo(40, -62);            // roof flat
++    ctx.quadraticCurveTo(62, -60, 74, -40);   // rear glass slope
++    ctx.lineTo(84, -34);            // trunk lid front
++    ctx.lineTo(98, -32);            // trunk lid
++    ctx.quadraticCurveTo(103, -30, 103, -14); // rear deck corner
++    ctx.lineTo(102, 2);             // rear bumper top
++    ctx.lineTo(100, 10);            // bumper bottom
++    // Underbody with wheel arch cutouts
++    ctx.lineTo(76, 10);
++    ctx.arc(58, 12, 19, Math.PI * 0.15, Math.PI * 0.85, true); // rear arch
++    ctx.lineTo(38, 24);
++    ctx.lineTo(-38, 24);
++    ctx.lineTo(-40, 12);
++    ctx.arc(-58, 12, 19, Math.PI * 0.15, Math.PI * 0.85, true); // front arch
++    ctx.lineTo(-78, 10);
++    ctx.closePath();
++
++    // Deep black body with faint vertical sheen (moonlight from above)
++    const bodyGrad = ctx.createLinearGradient(0, -64, 0, 24);
++    bodyGrad.addColorStop(0, '#141519');
++    bodyGrad.addColorStop(0.35, '#0a0b0e');
++    bodyGrad.addColorStop(1, '#030304');
++    ctx.fillStyle = bodyGrad;
++    ctx.fill();
++
++    // Moonlight rim highlight along roofline / trunk edge
++    ctx.strokeStyle = 'rgba(150,165,195,0.28)';
++    ctx.lineWidth = 1.4;
++    ctx.beginPath();
++    ctx.moveTo(-30, -46);
++    ctx.quadraticCurveTo(-14, -62, 8, -64);
++    ctx.lineTo(40, -62);
++    ctx.quadraticCurveTo(62, -60, 74, -40);
++    ctx.stroke();
++
++    // Side character-line catch light
++    ctx.strokeStyle = 'rgba(130,145,175,0.14)';
++    ctx.lineWidth = 1;
++    ctx.beginPath();
++    ctx.moveTo(-80, -14);
++    ctx.lineTo(96, -18);
++    ctx.stroke();
++
++    // --- Glass (dark, barely reflective) ---
++    ctx.fillStyle = 'rgba(22,28,40,0.9)';
++    ctx.beginPath(); // rear glass
++    ctx.moveTo(36, -58);
++    ctx.lineTo(58, -57);
++    ctx.quadraticCurveTo(68, -56, 71, -42);
++    ctx.lineTo(34, -44);
++    ctx.closePath();
++    ctx.fill();
++    ctx.beginPath(); // side glass hint
++    ctx.moveTo(-24, -44);
++    ctx.quadraticCurveTo(-10, -58, 6, -60);
++    ctx.lineTo(30, -58);
++    ctx.lineTo(30, -44);
++    ctx.closePath();
++    ctx.fill();
++
++    // Faint interior glow from instrument cluster through rear glass
++    ctx.fillStyle = 'rgba(90,120,150,0.10)';
++    ctx.fillRect(38, -54, 26, 8);
++
++    // --- Taillights (only warm light sources in the scene) ---
++    const leftTail = [-96, -20], rightTail = [92, -22];
++    for (const [tx, ty] of [leftTail, rightTail]) {
++      // Housing
++      ctx.fillStyle = '#2a0505';
++      ctx.beginPath();
++      ctx.roundRect(tx - 8, ty - 4, 16, 8, 2);
++      ctx.fill();
++      // Glow halo
++      const g = ctx.createRadialGradient(tx, ty, 1, tx, ty, 26);
++      g.addColorStop(0, 'rgba(255,60,40,0.85)');
++      g.addColorStop(0.35, 'rgba(255,40,25,0.35)');
++      g.addColorStop(1, 'rgba(255,40,25,0)');
++      ctx.fillStyle = g;
++      ctx.beginPath();
++      ctx.arc(tx, ty, 26, 0, Math.PI * 2);
++      ctx.fill();
++      // Core filament strip
++      ctx.fillStyle = 'rgba(255,90,70,0.95)';
++      ctx.fillRect(tx - 6, ty - 2, 12, 3);
++    }
++    // License plate wash
++    ctx.fillStyle = 'rgba(200,200,200,0.12)';
++    ctx.fillRect(-14, -14, 28, 10);
++    ctx.strokeStyle = 'rgba(255,120,100,0.25)';
++    ctx.lineWidth = 0.8;
++    ctx.strokeRect(-14, -14, 28, 10);
++
++    // Exhaust shimmer puff (subtle, dark heat haze dot)
++    ctx.fillStyle = 'rgba(180,180,190,0.05)';
++    ctx.beginPath();
++    ctx.arc(108, 6, 5 + Math.sin(spin * 0.13) * 1.5, 0, Math.PI * 2);
++    ctx.fill();
++
++    ctx.restore();
++  }
++
++  return {
++    resize(w, h) {
++      width = w;
++      height = h;
++    },
++    update(dt) {
++      const motionScale = prefersReducedMotion ? 0.35 : 1.0;
++      const dP = (Math.min(dt, 0.1) * motionScale) / LOOP_PERIOD;
++      const before = phase;
++      phase = wrap01(phase + dP);
++      // Detect seam crossing for the cycle counter (purely cosmetic subtitle info)
++      if (phase < before) loopCount++;
++    },
++    draw(context, w, h) {
++      const P = phase;                            // master phase 0..1
++      const TAU = Math.PI * 2;
++      const horizonY = h * 0.46;
++      const roadW = w * 0.62;                     // half-width of road at bottom
++      const farW = w * 0.004;                     // pinch at vanishing point
++
++      // ================= SKY =================
++      const sky = context.createLinearGradient(0, 0, 0, horizonY);
++      sky.addColorStop(0, '#010204');
++      sky.addColorStop(0.7, '#030509');
++      sky.addColorStop(1, '#060a12');
++      context.fillStyle = sky;
++      context.fillRect(0, 0, w, horizonY + 1);
++
++      // Stars (slow parallax drift, integer cycles → seamless)
++      for (const st of stars) {
++        const sx = wrap01(st.x - P * 0.02);         // whole-scene lateral drift
++        const tw = 0.65 + 0.35 * Math.sin(TAU * (st.cyc * P + st.ph));
++        context.fillStyle = `rgba(210,220,240,${(st.baseA * tw).toFixed(3)})`;
++        context.beginPath();
++        context.arc(sx * w, st.y * horizonY, st.r, 0, TAU);
++        context.fill();
++      }
++
++      // Thin crescent moon, high right (static anchor for the eye)
++      {
++        const mx = w * 0.78, my = horizonY * 0.22, mr = isPreview ? 10 : 16;
++        const mg = context.createRadialGradient(mx, my, mr * 0.4, mx, my, mr * 4);
++        mg.addColorStop(0, 'rgba(200,210,230,0.10)');
++        mg.addColorStop(1, 'rgba(200,210,230,0)');
++        context.fillStyle = mg;
++        context.beginPath();
++        context.arc(mx, my, mr * 4, 0, TAU);
++        context.fill();
++        context.fillStyle = '#cdd4de';
++        context.beginPath();
++        context.arc(mx, my, mr, 0, TAU);
++        context.fill();
++        context.fillStyle = '#04060a';
++        context.beginPath();
++        context.arc(mx - mr * 0.45, my - mr * 0.15, mr * 0.92, 0, TAU);
++        context.fill();
++      }
++
++      // ================= GROUND PLANE =================
++      const ground = context.createLinearGradient(0, horizonY, 0, h);
++      ground.addColorStop(0, '#040507');
++      ground.addColorStop(0.5, '#020303');
++      ground.addColorStop(1, '#000000');
++      context.fillStyle = ground;
++      context.fillRect(0, horizonY, w, h - horizonY);
++
++      // ================= DISTANT TREELINE =================
++      // Two silhouette bands scrolling at different (integer-tiled) speeds.
++      function drawTreeline(bumps, ampArr, speedCycles, baseY, maxAmp, color) {
++        context.fillStyle = color;
++        context.beginPath();
++        context.moveTo(0, h);
++        context.lineTo(0, baseY);
++        const shift = P * speedCycles; // bump-index scroll per loop (integer total)
++        const step = w / (bumps - 4);
++        for (let i = -1; i <= bumps; i++) {
++          const idx = ((Math.floor(i + shift) % bumps) + bumps) % bumps;
++          const fracShift = (i + shift) - Math.floor(i + shift);
++          const idx2 = (idx + 1) % bumps;
++          const amp = ampArr[idx] * (1 - fracShift) + ampArr[idx2] * fracShift;
++          const x = i * step;
++          const y = baseY - amp * maxAmp * (0.6 + 0.4 * Math.sin(i * 1.7 + idx));
++          context.lineTo(x, y);
++        }
++        context.lineTo(w, baseY);
++        context.lineTo(w, h);
++        context.closePath();
++        context.fill();
++      }
++      drawTreeline(TREE_BUMPS_A, treeAmpA, 6, horizonY + 2, isPreview ? 14 : 26, '#05070b');
++      drawTreeline(TREE_BUMPS_B, treeAmpB, 10, horizonY + 4, isPreview ? 9 : 16, '#030406');
++
++      // ================= ROAD =================
++      // Perspective helpers: z ∈ (0,1], 1 = camera plane, small = near horizon.
++      const camX = w * 0.5 + Math.sin(TAU * SWAY_CYCLES * P) * w * 0.006; // gentle sway
++      function roadEdges(z) {
++        // Half width scales linearly with z (flat-plane perspective approximation)
++        const hw = farW + (roadW - farW) * z;
++        const y = horizonY + (h * 1.02 - horizonY) * z;
++        const xc = camX + (w * 0.5 - camX) * z;
++        return { y, xc, hw };
++      }
++
++      // Asphalt wedge
++      const near = roadEdges(1), top = roadEdges(0.02);
++      context.fillStyle = '#0b0c0f';
++      context.beginPath();
++      context.moveTo(top.xc - top.hw, top.y);
++      context.lineTo(top.xc + top.hw, top.y);
++      context.lineTo(near.xc + near.hw, near.y);
++      context.lineTo(near.xc - near.hw, near.y);
++      context.closePath();
++      context.fill();
++
++      // Faint asphalt sheen from headlights (center glow, fades toward horizon)
++      const sheen = context.createRadialGradient(camX, h * 0.92, 10, camX, h * 0.92, h * 0.75);
++      sheen.addColorStop(0, 'rgba(190,195,180,0.10)');
++      sheen.addColorStop(0.5, 'rgba(190,195,180,0.03)');
++      sheen.addColorStop(1, 'rgba(190,195,180,0)');
++      context.fillStyle = sheen;
++      context.beginPath();
++      context.moveTo(top.xc - top.hw, top.y);
++      context.lineTo(top.xc + top.hw, top.y);
++      context.lineTo(near.xc + near.hw, near.y);
++      context.lineTo(near.xc - near.hw, near.y);
++      context.closePath();
++      context.fill();
++
++      // Solid white edge lines
++      context.strokeStyle = 'rgba(225,228,232,0.55)';
++      context.lineWidth = Math.max(1, w * 0.0012);
++      for (const off of [-0.96, 0.96]) {
++        context.beginPath();
++        context.moveTo(top.xc + top.hw * off, top.y);
++        context.lineTo(near.xc + near.hw * off, near.y);
++        context.stroke();
++      }
++
++      // Center dashed line — dash positions derived purely from P.
++      // DASHES_PER_LOOP is integer and the spacing tiles exactly → seamless.
++      const DASHES_PER_LOOP = 14;
++      context.fillStyle = 'rgba(235,238,242,0.75)';
++      for (let n = 0; n < DASHES_PER_LOOP + 2; n++) {
++        // Each dash sweeps z from tiny (horizon) to 1+ (under camera) once per loop
++        const raw = P + n / (DASHES_PER_LOOP + 2);
++        const u = wrap01(raw);                // 0..1 progress along path
++        const z = Math.pow(u, 2.4) * 1.05;    // accelerate toward viewer (perspective)
++        if (z < 0.015) continue;
++        const e = roadEdges(z);
++        const dashLen = Math.max(1.2, e.hw * 0.09);
++        const dashW = Math.max(1, e.hw * 0.016);
++        context.globalAlpha = Math.min(1, z * 6) * 0.85;
++        context.fillRect(e.xc - dashW / 2, e.y - dashLen, dashW, dashLen);
++      }
++      context.globalAlpha = 1;
++
++      // Lane divider dashes (two inner lanes) — same phase clock, offset grid
++      context.fillStyle = 'rgba(230,232,236,0.5)';
++      for (const laneOff of [-0.5, 0.5]) {
++        for (let n = 0; n < DASHES_PER_LOOP + 2; n++) {
++          const raw = P + (n + 0.5) / (DASHES_PER_LOOP + 2);
++          const u = wrap01(raw);
++          const z = Math.pow(u, 2.4) * 1.05;
++          if (z < 0.02) continue;
++          const e = roadEdges(z);
++          const dashLen = Math.max(1, e.hw * 0.07);
++          const dashW = Math.max(0.8, e.hw * 0.012);
++          context.globalAlpha = Math.min(1, z * 6) * 0.55;
++          context.fillRect(e.xc + e.hw * laneOff - dashW / 2, e.y - dashLen, dashW, dashLen);
++        }
++      }
++      context.globalAlpha = 1;
++
++      // ================= REFLECTOR POSTS (cat's-eye delineators) =================
++      // Right shoulder: red rear-facing reflectors; left shoulder: white forward.
++      // Integer counts per loop window → exact wrap at the seam.
++      function drawPostRow(count, side, hue, seedOffset) {
++        const rng = mulberry32(0xBEEF + seedOffset);
++        const jitter = [];
++        for (let i = 0; i < count; i++) jitter.push(rng() * 0.03);
++        for (let n = 0; n < count; n++) {
++          const raw = P + (n + jitter[n % jitter.length]) / count;
++          const u = wrap01(raw);
++          const z = Math.pow(u, 2.5) * 1.08;
++          if (z < 0.02) continue;
++          const e = roadEdges(z);
++          const px = e.xc + side * e.hw * 1.14;
++          const py = e.y;
++          const sz = Math.max(1.2, e.hw * 0.02);
++          const alpha = Math.min(1, z * 5);
++          // Post stem
++          context.fillStyle = `rgba(40,42,46,${(alpha * 0.8).toFixed(3)})`;
++          context.fillRect(px - sz * 0.2, py - sz * 5, sz * 0.4, sz * 5);
++          // Reflector bead + glow
++          const gx = px, gy = py - sz * 4.6;
++          const g = context.createRadialGradient(gx, gy, 0.5, gx, gy, sz * 3.2);
++          g.addColorStop(0, hue.core.replace('A', (alpha).toFixed(3)));
++          g.addColorStop(1, hue.halo.replace('A', '0'));
++          context.fillStyle = g;
++          context.beginPath();
++          context.arc(gx, gy, sz * 3.2, 0, TAU);
++          context.fill();
++          context.fillStyle = hue.core.replace('A', (alpha * 0.95).toFixed(3));
++          context.beginPath();
++          context.arc(gx, gy, sz * 0.55, 0, TAU);
++          context.fill();
++        }
++      }
++      const redHue = { core: 'rgba(255,70,50,A)', halo: 'rgba(255,70,50,A)' };
++      const whiteHue = { core: 'rgba(235,240,250,A)', halo: 'rgba(235,240,250,A)' };
++      drawPostRow(FAR_POST_SPAN, -1, whiteHue, 11);
++      drawPostRow(FAR_POST_SPAN, 1, redHue, 27);
++      drawPostRow(NEAR_POST_SPAN, -1.0, whiteHue, 41);
++      drawPostRow(NEAR_POST_SPAN, 1.0, redHue, 59);
++
++      // ================= HEADLIGHT BEAM ON ROAD AHEAD =================
++      // Cone projected ahead of the sedan, with scrolling texture locked to the
++      // SAME clock as the road dashes (integer cycles → seamless crossfade).
++      {
++        const bob = Math.sin(TAU * BOB_CYCLES * P);
++        const flicker = 0.92 + 0.08 * Math.sin(TAU * BEAM_FLICKER_CYCLES * P + 1.3);
++        const carS = isPreview ? w * 0.0016 : w * 0.0019;
++        const carCx = camX;
++        const carCy = h * 0.60 + bob * h * 0.004;
++        const beamTopZ = 0.10;
++        const bt = roadEdges(beamTopZ);
++
++        context.save();
++        context.globalCompositeOperation = 'lighter';
++
++        // Wide soft cone
++        const cone = context.createLinearGradient(carCx, carCy, bt.xc, bt.y);
++        cone.addColorStop(0, `rgba(255,250,225,${(0.16 * flicker).toFixed(3)})`);
++        cone.addColorStop(0.6, `rgba(255,250,225,${(0.05 * flicker).toFixed(3)})`);
++        cone.addColorStop(1, 'rgba(255,250,225,0)');
++        context.fillStyle = cone;
++        context.beginPath();
++        context.moveTo(carCx - 60 * carS * 26, carCy - 30 * carS * 26);
++        context.lineTo(bt.xc - bt.hw * 0.85, bt.y);
++        context.lineTo(bt.xc + bt.hw * 0.85, bt.y);
++        context.lineTo(carCx + 60 * carS * 26, carCy - 30 * carS * 26);
++        context.closePath();
++        context.fill();
++
++        // Hot inner spill directly in front of the car
++        const spill = context.createRadialGradient(carCx, carCy - 20 * carS * 26, 4, carCx, carCy - 20 * carS * 26, w * 0.3);
++        spill.addColorStop(0, `rgba(255,252,235,${(0.10 * flicker).toFixed(3)})`);
++        spill.addColorStop(1, 'rgba(255,252,235,0)');
++        context.fillStyle = spill;
++        context.fillRect(0, horizonY, w, h - horizonY);
++
++        // Scrolling light-stripes inside the cone (asphalt grain catching light).
++        // Stripe pattern scrolls with P * DASHES_PER_LOOP → identical at seam.
++        context.clip();
++        context.fillStyle = `rgba(255,250,220,${(0.028 * flicker).toFixed(3)})`;
++        const STRIPES = DASHES_PER_LOOP;
++        for (let n = 0; n < STRIPES; n++) {
++          const u = wrap01(P + n / STRIPES);
++          const z = Math.pow(u, 2.4) * 1.0;
++          if (z < 0.05) continue;
++          const e = roadEdges(z);
++          const th = Math.max(1, e.hw * 0.05);
++          context.fillRect(e.xc - e.hw * 0.8, e.y - th, e.hw * 1.6, th);
++        }
++        context.restore();
++      }
++
++      // ================= GUARDRAILS (near shoulders) =================
++      {
++        const railZ0 = 0.06, railZ1 = 1.05;
++        for (const side of [-1, 1]) {
++          context.strokeStyle = 'rgba(70,75,82,0.5)';
++          context.lineWidth = Math.max(1, w * 0.0016);
++          const a = roadEdges(railZ0), b = roadEdges(railZ1);
++          const liftA = Math.max(2, a.hw * 0.05), liftB = Math.max(6, b.hw * 0.05);
++          context.beginPath();
++          context.moveTo(a.xc + side * a.hw * 1.08, a.y - liftA);
++          context.lineTo(b.xc + side * b.hw * 1.08, b.y - liftB);
++          context.stroke();
++          // Posts, integer scroll
++          const RAIL_POSTS = 10;
++          context.strokeStyle = 'rgba(55,58,64,0.55)';
++          context.lineWidth = Math.max(1, w * 0.001);
++          for (let n = 0; n < RAIL_POSTS; n++) {
++            const u = wrap01(P + n / RAIL_POSTS);
++            const z = Math.pow(u, 2.4) * 1.05;
++            if (z < 0.05) continue;
++            const e = roadEdges(z);
++            const lift = Math.max(2, e.hw * 0.05);
++            context.beginPath();
++            context.moveTo(e.xc + side * e.hw * 1.08, e.y);
++            context.lineTo(e.xc + side * e.hw * 1.08, e.y - lift);
++            context.stroke();
++          }
++        }
++      }
++
++      // ================= THE BLACK SEDAN =================
++      {
++        const roll = Math.sin(TAU * ROLL_CYCLES * P) * 0.012 + Math.sin(TAU * (ROLL_CYCLES * 2) * P + 0.7) * 0.005;
++        const bob = Math.sin(TAU * BOB_CYCLES * P + 1.9) * 0.004;
++        const carS = isPreview ? w * 0.0016 : w * 0.0019;
++        const carCx = camX + Math.sin(TAU * SWAY_CYCLES * P) * w * 0.004;
++        const carCy = h * 0.60 + bob * h;
++        context.save();
++        context.translate(carCx, carCy);
++        context.rotate(roll);
++        context.translate(-carCx, -carCy);
++        drawCarBody(context, carCx, carCy, carS);
++        context.restore();
++
++        // Red taillight bloom cast onto the road behind the car
++        context.save();
++        context.globalCompositeOperation = 'lighter';
++        const tailGlow = context.createRadialGradient(carCx, carCy - carS * 20, 2, carCx, carCy - carS * 20, w * 0.16);
++        tailGlow.addColorStop(0, 'rgba(255,45,30,0.10)');
++        tailGlow.addColorStop(1, 'rgba(255,45,30,0)');
++        context.fillStyle = tailGlow;
++        context.fillRect(carCx - w * 0.16, carCy - carS * 20 - w * 0.16, w * 0.32, w * 0.32);
++        context.restore();
++      }
++
++      // Subtle vignette to focus the frame (static → seam-safe)
++      const vg = context.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.75);
++      vg.addColorStop(0, 'rgba(0,0,0,0)');
++      vg.addColorStop(1, 'rgba(0,0,0,0.45)');
++      context.fillStyle = vg;
++      context.fillRect(0, 0, w, h);
++
++      // Runtime subtitle
++      if (!isPreview) {
++        context.fillStyle = 'rgba(135, 206, 250, 0.75)';
++        context.font = '12px -apple-system, BlinkMacSystemFont, monospace';
++        context.textAlign = 'left';
++        context.fillText(`UNLIT NIGHT HIGHWAY: MOONLIGHT, CAT'S-EYES & SEAMLESS ${LOOP_PERIOD}s INFINITE LOOP · CYCLE ${loopCount + 1}`, 28, h - 28);
++      }
++    },
++    destroy() {
++      stars.length = 0;
++      treeAmpA.length = 0;
++      treeAmpB.length = 0;
++    }
++  };
++}
++
+ /**
+  * ALL TYPES RANDOMIZER PREVIEW
+  * Distinctive dashboard preview that dynamically cycles representative visual effects
